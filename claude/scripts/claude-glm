@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# claude-glm — run Claude Code with GLM (Z.ai Coding Plan) instead of Claude Max.
+# This is "Tab B" (the hands) in the two-tier workflow. Tab A stays plain `claude` (Max/Opus).
+# NOTE: env is set PER-PROCESS, NOT written to ~/.claude/settings.json
+#       (settings.json is global -> would turn BOTH tabs into GLM, breaking the two-tier split).
+set -euo pipefail
+
+KEY_FILE="$HOME/.claude/.glm-key"
+ROLE_FILE="$HOME/.claude/glm-role.md"
+
+if [[ ! -s "$KEY_FILE" ]]; then
+  echo "❌ No GLM key in $KEY_FILE" >&2
+  echo "   1) Buy a Coding Plan: https://z.ai/subscribe" >&2
+  echo "   2) Create an API key in the Z.ai dashboard" >&2
+  echo "   3) Paste ONLY the key (one line) into $KEY_FILE" >&2
+  exit 1
+fi
+
+GLM_KEY="$(tr -d '[:space:]' < "$KEY_FILE")"
+
+# Tab B = the hands, doesn't need MCP. Disable all MCP servers to shrink the context
+# so it fits GLM's window (avoids "reached its context window limit" with many MCP servers).
+# (safe with the default bash 3.2 on macOS)
+args=(--strict-mcp-config)
+[[ -f "$ROLE_FILE" ]] && args+=(--append-system-prompt-file "$ROLE_FILE")
+
+# Pin GLM-5.2 1M-context variant by default. Override: GLM_MODEL=glm-4.7 claude-glm
+GLM_MODEL="${GLM_MODEL:-glm-5.2[1m]}"
+
+exec env \
+  ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic" \
+  ANTHROPIC_AUTH_TOKEN="$GLM_KEY" \
+  API_TIMEOUT_MS="3000000" \
+  ANTHROPIC_DEFAULT_SONNET_MODEL="$GLM_MODEL" \
+  ANTHROPIC_DEFAULT_OPUS_MODEL="$GLM_MODEL" \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL="glm-4.5-air" \
+  CLAUDE_CODE_AUTO_COMPACT_WINDOW="1000000" \
+  claude ${args[@]+"${args[@]}"} "$@"
