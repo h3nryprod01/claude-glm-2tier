@@ -1,5 +1,5 @@
 I create this because I get weekly rate limit on Max x20 just after 3 working 5-hour windows.
-Disappointed.
+Disappointed @Anthropic.
 
 # claude-glm-2tier
 
