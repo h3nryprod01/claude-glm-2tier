@@ -107,6 +107,15 @@ gate, the `activeContext.md` template, and fail-over rules.
 - The GLM Coding Plan covers **text/coding GLM models only** — not image/video models (and Claude
   Code can only drive a text model anyway).
 
+## The Results
+
+<img width="1241" height="550" alt="image" src="https://github.com/user-attachments/assets/5787d701-a5d2-4a6b-94e8-3eec2e28ac8c" />
+
+This is Z lite plan, so cheap with the same output compare to Opus 4.8 (so f*cking expensive)
+<img width="623" height="215" alt="image" src="https://github.com/user-attachments/assets/5b6ef6f3-9918-428b-9ef2-9ecb5ec2c897" />
+
+
+
 ## Security
 
 Your GLM key lives in `~/.claude/.glm-key` (mode 600), outside this repo. `.gitignore` blocks
