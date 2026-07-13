@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# glm-job — run claude-glm as a background job, so you can fire work at GLM and
+# keep working in your Opus session without blocking. Minimal state machine, no daemon.
+#   glm-job start "<task>"   -> prints job id, runs in background
+#   glm-job status [id]      -> status of a job (latest if id omitted)
+#   glm-job result [id]      -> stdout of a job (latest if id omitted)
+#   glm-job cancel [id]      -> kill a running job (latest if id omitted)
+#   glm-job list             -> all jobs, newest first
+# State lives in ~/.claude/glm-jobs/<id>/. GLM runs in the CURRENT directory.
+set -euo pipefail
+
+JOBS="$HOME/.claude/glm-jobs"
+GLM="${GLM_BIN:-claude-glm}"   # overridable for testing
+mkdir -p "$JOBS"
+
+latest_id() { ls -1 "$JOBS" 2>/dev/null | sort | tail -1; }
+
+# refresh a job's status file based on whether its pid is still alive
+refresh() {
+  local dir="$1"
+  [ -f "$dir/status" ] || return 0
+  [ "$(cat "$dir/status")" = "running" ] || return 0
+  local pid; pid="$(cat "$dir/pid" 2>/dev/null || echo)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+  # pid gone but status still running -> the wrapper died without writing; mark stale
+  echo failed > "$dir/status"
+}
+
+start() {
+  local task="$*"
+  [ -n "$task" ] || { echo "usage: glm-job start <task>" >&2; exit 1; }
+  local id; id="job-$(date +%Y%m%d-%H%M%S)-$$"
+  local dir="$JOBS/$id"
+  mkdir -p "$dir"
+  printf '%s\n' "$task" > "$dir/task.txt"
+  printf '%s\n' "$PWD"  > "$dir/cwd.txt"
+  echo running > "$dir/status"
+  # detached wrapper: run GLM headless, capture output + exit code, set final status
+  nohup bash -c '
+    dir="$1"; task="$2"; glm="$3"; workdir="$4"
+    cd "$workdir" 2>/dev/null || true
+    "$glm" --strict-mcp-config --permission-mode acceptEdits -p "$task" > "$dir/output.log" 2>&1
+    code=$?
+    echo "$code" > "$dir/exit"
+    if [ "$code" = "0" ]; then echo done > "$dir/status"; else echo failed > "$dir/status"; fi
+  ' _ "$dir" "$task" "$GLM" "$PWD" >/dev/null 2>&1 &
+  echo $! > "$dir/pid"
+  echo "$id"
+}
+
+status() {
+  local id="${1:-$(latest_id)}"
+  [ -n "$id" ] || { echo "no jobs yet"; return 0; }
+  local dir="$JOBS/$id"
+  [ -d "$dir" ] || { echo "no such job: $id" >&2; exit 1; }
+  refresh "$dir"
+  printf '%s  [%s]\n' "$id" "$(cat "$dir/status")"
+  printf '  task: %s\n' "$(head -c 200 "$dir/task.txt")"
+  [ -f "$dir/exit" ] && printf '  exit: %s\n' "$(cat "$dir/exit")"
+}
+
+result() {
+  local id="${1:-$(latest_id)}"
+  [ -n "$id" ] || { echo "no jobs yet"; return 0; }
+  local dir="$JOBS/$id"
+  [ -d "$dir" ] || { echo "no such job: $id" >&2; exit 1; }
+  refresh "$dir"
+  printf '=== %s [%s] ===\n' "$id" "$(cat "$dir/status")"
+  [ -f "$dir/output.log" ] && cat "$dir/output.log" || echo "(no output yet)"
+}
+
+cancel() {
+  local id="${1:-$(latest_id)}"
+  [ -n "$id" ] || { echo "no jobs yet"; return 0; }
+  local dir="$JOBS/$id"
+  [ -d "$dir" ] || { echo "no such job: $id" >&2; exit 1; }
+  local pid; pid="$(cat "$dir/pid" 2>/dev/null || echo)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    pkill -P "$pid" 2>/dev/null || true   # best-effort: kill children (the glm process)
+    kill "$pid" 2>/dev/null || true
+    echo canceled > "$dir/status"
+    echo "canceled $id"
+  else
+    echo "$id not running"
+  fi
+}
+
+list() {
+  local any=0
+  for id in $(ls -1 "$JOBS" 2>/dev/null | sort -r); do
+    any=1; refresh "$JOBS/$id"
+    printf '%s  [%s]  %s\n' "$id" "$(cat "$JOBS/$id/status")" "$(head -c 60 "$JOBS/$id/task.txt")"
+  done
+  [ "$any" = 1 ] || echo "no jobs yet"
+}
+
+case "${1:-}" in
+  start)  shift; start "$@" ;;
+  status) shift; status "${1:-}" ;;
+  result) shift; result "${1:-}" ;;
+  cancel) shift; cancel "${1:-}" ;;
+  list)   list ;;
+  *) echo "usage: glm-job {start <task>|status [id]|result [id]|cancel [id]|list}" >&2; exit 1 ;;
+esac

@@ -9,7 +9,9 @@ CLAUDE="$HOME/.claude"
 echo "Installing into $CLAUDE ..."
 mkdir -p "$CLAUDE/scripts" "$CLAUDE/commands" "$CLAUDE/docs" "$HOME/.local/bin"
 
-install -m 0755 "$HERE/claude/scripts/claude-glm" "$CLAUDE/scripts/claude-glm"
+for f in "$HERE"/claude/scripts/*; do
+  install -m 0755 "$f" "$CLAUDE/scripts/$(basename "$f")"
+done
 cp "$HERE/claude/glm-role.md"    "$CLAUDE/glm-role.md"
 cp "$HERE"/claude/commands/*.md  "$CLAUDE/commands/"
 cp "$HERE"/claude/docs/*.md      "$CLAUDE/docs/"
@@ -20,6 +22,7 @@ chmod 600 "$CLAUDE/.glm-key"
 
 # put claude-glm on PATH via symlink
 ln -sf "$CLAUDE/scripts/claude-glm" "$HOME/.local/bin/claude-glm"
+ln -sf "$CLAUDE/scripts/glm-job"    "$HOME/.local/bin/glm-job"
 
 echo
 echo "✅ Installed."

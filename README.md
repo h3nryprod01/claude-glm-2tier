@@ -79,6 +79,21 @@ From an Opus session, offload a chunk to GLM inline:
 Opus shells out to `claude-glm`, then verifies and reviews the result itself. (Note: this nests a
 Claude Code process; if it hangs on your machine, use the two-tab flow instead.)
 
+### Background jobs (fire and forget)
+
+Hand a task to GLM as a **background job** and keep working in your Opus session — don't block:
+
+```
+/glm-bg refactor the date helpers and add tests
+/glm-status          # running / done / failed
+/glm-result          # show output, then Opus reviews the diff
+/glm-cancel          # stop it
+```
+
+Jobs run on the GLM pool in the current repo; state lives in `~/.claude/glm-jobs/<id>/`. This is the
+useful half of Codex-plugin's "app-server broker" (background delegation + status/result/cancel) without
+a persistent daemon. `glm-job list` shows all jobs.
+
 See [`claude/docs/2tier-workflow.md`](claude/docs/2tier-workflow.md) and
 [`claude/docs/handoff-prompts.md`](claude/docs/handoff-prompts.md) for the full loop, the review
 gate, the `activeContext.md` template, and fail-over rules.
@@ -91,6 +106,10 @@ gate, the `activeContext.md` template, and fail-over rules.
 | `/glm-go` | B (GLM) | Read the plan, execute, self-verify |
 | `/opus-review` | A (Opus) | Review GLM's `git diff` before reporting |
 | `/glm <task>` | A (Opus) | Offload to GLM inline, then self-verify |
+| `/glm-bg <task>` | A (Opus) | Fire a GLM job in the background (non-blocking) |
+| `/glm-status [id]` | A (Opus) | Check background GLM jobs |
+| `/glm-result [id]` | A (Opus) | Show a finished job's output, then review it |
+| `/glm-cancel [id]` | A (Opus) | Cancel a running background job |
 
 ## Design notes / gotchas (learned the hard way)
 
