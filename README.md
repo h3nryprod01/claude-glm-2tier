@@ -94,6 +94,22 @@ Jobs run on the GLM pool in the current repo; state lives in `~/.claude/glm-jobs
 useful half of Codex-plugin's "app-server broker" (background delegation + status/result/cancel) without
 a persistent daemon. `glm-job list` shows all jobs.
 
+### Third-opinion review via Codex (optional)
+
+Opus and GLM both live in the Anthropic/Claude-Code world and can share blind spots. For a high-stakes
+change you can add a review from a **different vendor** — Codex (GPT) — as a third, independent pass:
+
+```
+/codex-review                 # review current changes
+/codex-review --base main     # review the branch vs main
+/codex-review challenge the retry/caching design   # focused adversarial review
+```
+
+This is a **bridge**, not a bundled copy: it shells out to `codex exec review` (read-only). You install
+[openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) (or `@openai/codex`) separately and
+run `codex login` once. It draws your Codex usage and sends the diff to OpenAI — use it for the risky
+20%, not every change.
+
 See [`claude/docs/2tier-workflow.md`](claude/docs/2tier-workflow.md) and
 [`claude/docs/handoff-prompts.md`](claude/docs/handoff-prompts.md) for the full loop, the review
 gate, the `activeContext.md` template, and fail-over rules.
@@ -110,6 +126,7 @@ gate, the `activeContext.md` template, and fail-over rules.
 | `/glm-status [id]` | A (Opus) | Check background GLM jobs |
 | `/glm-result [id]` | A (Opus) | Show a finished job's output, then review it |
 | `/glm-cancel [id]` | A (Opus) | Cancel a running background job |
+| `/codex-review [--base b]` | A (Opus) | Independent 3rd-opinion review via Codex (different vendor) |
 
 ## Design notes / gotchas (learned the hard way)
 
