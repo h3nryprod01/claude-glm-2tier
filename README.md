@@ -13,16 +13,7 @@ A tiny, no-dependency setup that runs two Claude Code instances side by side:
 They share one git repo and a plain handoff file (`.claude/memory/activeContext.md`). Opus reviews
 GLM's diff before anything reaches you.
 
-```
-        1 GIT REPO  (.claude/memory/activeContext.md = handoff bus)
-        ┌──────────────┐            ┌──────────────┐
-Tab A → │ claude (Max) │            │ claude-glm   │ ← Tab B
-        │ = OPUS       │  activeContext.md  │ = GLM-5.2 │
-        │ THE BRAIN    │ ─── plan ──►│ THE HANDS    │
-        │ plan+review  │ ◄── review─ │ code+test    │
-        └──────────────┘            └──────────────┘
-         spends Max pool             spends GLM pool
-```
+<p align="center"><img src="docs/flow.svg" alt="claude-glm-2tier flow: Opus (Max) plans and reviews, GLM (Z.ai flat-fee) writes code, sharing one repo via activeContext.md; review escalates GLM self-verify → Opus review → optional Codex review" width="820"></p>
 
 ## Why this works (and why Sonnet subagents don't)
 
