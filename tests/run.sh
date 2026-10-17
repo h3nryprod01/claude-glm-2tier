@@ -168,6 +168,16 @@ mkdir -p "$R3/sub/.claude/memory" "$R3/customhooks"; printf '# plan\n' > "$R3/su
 fake "echo '$GOOD'; printf 'evil\n' > $R3/customhooks/pre-rebase"
 out="$(HOME="$T" python3 -I "$WR" --repo "$R3/sub" 2>&1)"; rc=$?
 check "run from a subdirectory still watches the effective hooks dir (relative core.hooksPath)" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "pre-rebase"'
+mkdir -p "$R3/.devcontainer"; for i in 1 2 3 4 5; do echo $i > "$R3/.devcontainer/f$i"; done
+out="$(WORKER_RUN_MAX_ENTRIES=3 HOME="$T" python3 -I "$WR" --repo "$R3" 2>&1)"; rc=$?
+check "a tree bigger than the snapshot cap fails closed: the worker is not started" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "not running the worker" && echo "$out" | grep -q "more than 3 files"'
+out="$(WORKER_RUN_MAX_BYTES=100 HOME="$T" python3 -I "$WR" --repo "$R3" 2>&1)"; rc=$?
+check "a byte budget overrun fails closed too" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "not running the worker"'
+rm -rf "$R3/.devcontainer"; mkdir -p "$R3/.devcontainer"; echo 1 > "$R3/.devcontainer/f1"
+fake "echo '$GOOD'; for i in 2 3 4 5 6; do echo x > $R3/.devcontainer/f\$i; done"
+out="$(WORKER_RUN_MAX_ENTRIES=4 HOME="$T" python3 -I "$WR" --repo "$R3" 2>&1)"; rc=$?
+check "growing past the cap during the run is an alert (snapshot failed after the run)" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "SECURITY ALERT" && echo "$out" | grep -q "snapshot failed"'
+rm -rf "$R3/.devcontainer"
 fake "( sleep 1; printf 'late\n' > $R3/.husky/late ) >/dev/null 2>&1 & echo '$GOOD'"
 HOME="$T" python3 -I "$WR" --repo "$R3" >/dev/null 2>&1; sleep 2
 check "stragglers are killed so they cannot edit after the check" '[ ! -e "$R3/.husky/late" ]'

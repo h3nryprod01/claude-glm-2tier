@@ -84,7 +84,24 @@ def log_run(entry):
 # detaches into its own session can outlive the group kill (macOS has no cgroups to contain it).
 WATCH = [".envrc", ".vscode", ".husky", ".githooks", ".devcontainer", ".idea", ".mcp.json",
          os.path.join(".claude", "settings.json"), os.path.join(".claude", "settings.local.json")]
-MAX_ENTRIES = 20000  # files walked per watched tree; beyond this the tree is fingerprinted as "truncated"
+# Snapshot limits. Exceeding any of them is a FAILURE (fail closed): before the run the worker is not started,
+# after the run it is reported as a security alert. They are env-overridable mainly so tests can exercise them.
+MAX_ENTRIES = int(os.environ.get("WORKER_RUN_MAX_ENTRIES", 20000))        # files walked per watched tree
+MAX_BYTES = int(os.environ.get("WORKER_RUN_MAX_BYTES", 512 * 1024 * 1024))  # bytes hashed per snapshot
+MAX_SECONDS = float(os.environ.get("WORKER_RUN_SNAPSHOT_SECONDS", 60))      # wall clock per snapshot
+_budget = {"bytes": 0, "deadline": 0.0}
+
+
+class SnapshotLimit(Exception):
+    pass
+
+
+def _tick(nbytes=0):
+    _budget["bytes"] += nbytes
+    if _budget["bytes"] > MAX_BYTES:
+        raise SnapshotLimit(f"hashed more than {MAX_BYTES} bytes in one snapshot")
+    if time.time() > _budget["deadline"]:
+        raise SnapshotLimit(f"snapshot took longer than {MAX_SECONDS:g}s")
 
 
 def _hash_regular(path):
@@ -94,6 +111,7 @@ def _hash_regular(path):
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as fh:
             for chunk in iter(lambda: fh.read(1 << 20), b""):
+                _tick(len(chunk))
                 h.update(chunk)
     except OSError as e:
         return f"unreadable:{e.errno}"
@@ -122,13 +140,16 @@ def _fingerprint(path):
     return _hash_regular(path)
 
 
-def _walk_files(root):
+def _walk_files(root, skip_samples=False):
     n = 0
     for r, _, fs in os.walk(root):  # os.walk does not descend into symlinked dirs
         for f in fs:
+            if skip_samples and f.endswith(".sample"):
+                continue  # stock git samples are not code that runs, so they must not eat the entry budget
             n += 1
+            _tick()
             if n > MAX_ENTRIES:
-                return
+                raise SnapshotLimit(f"more than {MAX_ENTRIES} files under {root}")
             yield os.path.join(r, f)
 
 
@@ -140,13 +161,12 @@ def _digest_tree(path, skip_samples=False):
         # a symlinked directory: record the link and fingerprint the resolved tree, keyed by resolved path
         out[path] = "symlink->" + os.readlink(path)
         real = os.path.realpath(path)
-        for f in _walk_files(real):
-            if not (skip_samples and f.endswith(".sample")):
-                out[f] = _fingerprint(f)
+        for f in _walk_files(real, skip_samples):
+            out[f] = _fingerprint(f)
         return out
     if os.path.isdir(path):
         out[path + "/"] = "dir"
-        paths = list(_walk_files(path))
+        paths = list(_walk_files(path, skip_samples))
     else:
         paths = [path]
     for f in paths:
@@ -164,6 +184,7 @@ def _git(repo, *args):
 def code_exec_snapshot(repo):
     """Fingerprint git hooks/config (common dir, worktree dir, the EFFECTIVE hooks dir incl. core.hooksPath)
     and the auto-run repo files, at both the given dir and the repository top level."""
+    _budget["bytes"], _budget["deadline"] = 0, time.time() + MAX_SECONDS
     snap = {}
     top = _git(repo, "rev-parse", "--show-toplevel") or repo
     for flag in ("--git-common-dir", "--git-dir"):
@@ -241,9 +262,11 @@ def main():
     rc, stdout, stderr, timed_out = run_worker(cmd, repo, a.timeout)
     seconds = round(time.time() - started)
     time.sleep(1.5)  # grace for stragglers that outlive the group kill; then check
+    interrupted = False
     try:
         changed = snapshot_diff(before, code_exec_snapshot(repo))
-    except Exception as e:  # fail closed: an unreadable "after" state is itself an alert
+    except (Exception, KeyboardInterrupt) as e:  # fail closed: an unreadable/interrupted "after" state is an alert
+        interrupted = isinstance(e, KeyboardInterrupt)
         changed = [f"(snapshot failed after the run: {e!r})"]
     if changed:
         append_bus(bus, a.lane, "status: BLOCKER - SECURITY: files that execute code on your machine changed during the "
@@ -252,6 +275,8 @@ def main():
         print("worker-run: SECURITY ALERT: code-executing files changed during the run:", file=sys.stderr)
         for f in changed:
             print(f"  {f}", file=sys.stderr)
+        if interrupted:
+            sys.exit(130)
 
     if timed_out:
         append_bus(bus, a.lane, f"status: BLOCKER - worker-run timed out after {a.timeout}s and the worker was killed; "

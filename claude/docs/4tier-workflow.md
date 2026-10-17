@@ -115,7 +115,9 @@ From the desktop app, Main can launch `worker-run` itself in a real terminal tab
   walked through, FIFOs/devices are never opened. Any change is a `BLOCKER - SECURITY` in the bus and a
   non-zero exit, because a modified hook would execute on YOUR machine at your next commit. The worker's
   process group is killed when it returns and the check runs after a 1.5 s grace; an unreadable "after" state
-  counts as an alert. **Known gaps:** a descendant that detaches into its own session can outlive the group
+  counts as an alert. The snapshot has limits (20,000 files per watched tree, 512 MB hashed, 60 s) and
+  exceeding any of them fails closed: before the run the worker is not started, after the run it is an alert.
+  **Known gaps:** a descendant that detaches into its own session can outlive the group
   kill and edit later (macOS has no cgroups to contain it); toolchain-specific auto-run files are unknown to it
   (package.json scripts, Makefiles, CI files are reviewed in the diff instead); and edits made by an
   interactive `claude-mimo` session are not fingerprinted, so check `git status` and `.git/hooks` yourself.
