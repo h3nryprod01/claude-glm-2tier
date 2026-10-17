@@ -107,6 +107,11 @@ From the desktop app, Main can launch `worker-run` itself in a real terminal tab
   once (Claude Code 2.1.301, macOS): 6 risky probes (read a canary under `~/.claude` with cat, the Read tool and
   node, write outside the repo, curl, read the provider key from env) were all denied, and the control
   command `npm test` ran. The permission layer stopped them, so the OS sandbox itself was not separately exercised.
+- **Persistence guard.** Edits to `.git/`, `.envrc`, `.husky/` and `.vscode/` are denied by policy, and
+  `worker-run` also hashes the git hooks/config and those paths before and after every run: any change is a
+  `BLOCKER - SECURITY` in the bus and a non-zero exit, because a modified hook would execute on YOUR machine
+  at your next commit. WebFetch/WebSearch are denied too (the Bash sandbox does not cover them). Edits made
+  by an interactive `claude-mimo` session are not hashed: review `git status` and `.git/hooks` yourself.
 - **Consequences:** `failIfUnavailable` means the worker will not start on a machine without sandbox
   support (Linux needs `bubblewrap` and `socat`); an empty `allowedDomains` blocks `npm/pip install`
   during verification (install dependencies yourself first); verify commands outside the allow-list (go,

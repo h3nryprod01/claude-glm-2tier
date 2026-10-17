@@ -59,7 +59,30 @@
       "Bash(sudo:*)",
       "Bash(curl:*)",
       "Bash(wget:*)",
-      "Bash(security:*)"
+      "Bash(security:*)",
+      "Read(~/.bash_history)",
+      "Read(~/.claude-worker/**)",
+      "Read(~/.config/**)",
+      "Read(~/.docker/**)",
+      "Read(~/.git-credentials)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.kube/**)",
+      "Read(~/.netrc)",
+      "Read(~/.npmrc)",
+      "Read(~/.pypirc)",
+      "Read(~/.zsh_history)",
+      "Edit(**/.git/**)",
+      "Write(**/.git/**)",
+      "Edit(**/.envrc)",
+      "Write(**/.envrc)",
+      "Edit(**/.vscode/**)",
+      "Write(**/.vscode/**)",
+      "Edit(**/.husky/**)",
+      "Write(**/.husky/**)",
+      "Edit(~/.claude-worker/**)",
+      "Write(~/.claude-worker/**)",
+      "WebFetch",
+      "WebSearch"
     ]
   }
 }

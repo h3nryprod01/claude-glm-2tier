@@ -19,6 +19,7 @@ nested `claude -p` hangs.
 """
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import signal
@@ -75,6 +76,50 @@ def log_run(entry):
         fh.write(json.dumps(entry) + "\n")
 
 
+# Files that later execute code on YOUR machine (git hooks run at your next commit, .envrc/.husky/.vscode
+# at your next shell/commit/folder open). A worker has no business changing them, so a change is an alert.
+WATCH = [".envrc", ".vscode", ".husky"]
+
+
+def _digest_tree(path, skip_samples=False):
+    out = {}
+    if os.path.isfile(path):
+        paths = [path]
+    else:
+        paths = [os.path.join(r, f) for r, _, fs in os.walk(path) for f in fs]
+    for f in paths:
+        if skip_samples and f.endswith(".sample"):
+            continue
+        try:
+            with open(f, "rb") as fh:
+                out[f] = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            out[f] = "unreadable"
+    return out
+
+
+def code_exec_snapshot(repo):
+    """Hash git hooks/config and the repo files that auto-run on your machine."""
+    snap = {}
+    try:
+        gd = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=repo, capture_output=True, text=True, timeout=20)
+        gitdir = os.path.abspath(os.path.join(repo, gd.stdout.strip())) if gd.returncode == 0 and gd.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError):
+        gitdir = None
+    if gitdir:
+        snap.update(_digest_tree(os.path.join(gitdir, "hooks"), skip_samples=True))
+        snap.update(_digest_tree(os.path.join(gitdir, "config")))
+    for rel in WATCH:
+        p = os.path.join(repo, rel)
+        if os.path.exists(p):
+            snap.update(_digest_tree(p))
+    return snap
+
+
+def snapshot_diff(before, after):
+    return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+
+
 def run_worker(cmd, repo, timeout):
     """Run in its own process group so a timeout can kill the worker AND whatever it spawned."""
     p = subprocess.Popen(cmd, cwd=repo, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -114,9 +159,18 @@ def main():
     for rule in a.allow:
         cmd += ["--allowedTools", rule]
 
+    before = code_exec_snapshot(repo)
     started = time.time()
     rc, stdout, stderr, timed_out = run_worker(cmd, repo, a.timeout)
     seconds = round(time.time() - started)
+    changed = snapshot_diff(before, code_exec_snapshot(repo))
+    if changed:
+        append_bus(bus, a.lane, "status: BLOCKER - SECURITY: files that execute code on your machine changed during the "
+                                "worker run (git hooks/config, .envrc, .husky, .vscode). Inspect and revert them before "
+                                "committing or opening a shell here:\n" + "\n".join(changed))
+        print("worker-run: SECURITY ALERT: code-executing files changed during the run:", file=sys.stderr)
+        for f in changed:
+            print(f"  {f}", file=sys.stderr)
 
     if timed_out:
         append_bus(bus, a.lane, f"status: BLOCKER - worker-run timed out after {a.timeout}s and the worker was killed; "
@@ -153,6 +207,8 @@ def main():
     if cost is not None:
         print(f"worker-run: real cost ${cost:.4f} (logged to {LOG})")
     print(f"worker-run: report appended to {bus}; review the diff next (/opus-review)")
+    if changed:
+        sys.exit("worker-run: SECURITY ALERT above: do not commit or run anything in this repo until you have checked those files")
     if failed:
         sys.exit(f"worker-run: the worker reported an error (exit {rc}); read the report before trusting the tree")
 

@@ -39,6 +39,8 @@ echo "worker policy (settings.json template)"
 check "valid JSON with the sandbox on" 'python3 -I -c "import json,sys; d=json.load(open(sys.argv[1])); s=d[\"sandbox\"]; assert s[\"enabled\"] and s[\"failIfUnavailable\"] and s[\"allowUnsandboxedCommands\"] is False and s[\"network\"][\"allowedDomains\"]==[]" "$HERE/claude/worker-config/settings.json"'
 check "no blanket interpreter/Read/Edit/Write allow" 'python3 -I -c "import json,sys; a=json.load(open(sys.argv[1]))[\"permissions\"][\"allow\"]; bad={\"Read\",\"Edit\",\"Write\",\"Bash(node:*)\",\"Bash(python3:*)\",\"Bash(cat:*)\"}; assert not (bad & set(a)), a" "$HERE/claude/worker-config/settings.json"'
 check "denies reading credential dirs in the sandbox" 'python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]))[\"sandbox\"][\"filesystem\"][\"denyRead\"]; assert {\"~/.ssh\",\"~/.aws\",\"~/.claude\",\"~/.config\",\"~/.kube\",\"~/Library/Keychains\",\"~/Library/Application Support\",\"~/Library/Cookies\",\"~/Library/Containers\"} <= set(r), r" "$HERE/claude/worker-config/settings.json"'
+check "denies persistence paths and non-Bash network tools" 'python3 -I -c "import json,sys; d=set(json.load(open(sys.argv[1]))[\"permissions\"][\"deny\"]); need={\"Edit(**/.git/**)\",\"Write(**/.git/**)\",\"Edit(**/.envrc)\",\"Edit(**/.husky/**)\",\"Edit(**/.vscode/**)\",\"WebFetch\",\"WebSearch\"}; assert need <= d, need - d" "$HERE/claude/worker-config/settings.json"'
+check "Read denies mirror the sandbox denyRead list" 'python3 -I -c "import json,sys; s=json.load(open(sys.argv[1])); d=s[\"permissions\"][\"deny\"]; names=s[\"sandbox\"][\"filesystem\"][\"denyRead\"]; bases=[r[5:-1].removesuffix(\"/**\") for r in d if r.startswith(\"Read(\")]; missing=[n for n in names if not any(n==b or n.startswith(b+\"/\") for b in bases)]; assert not missing, missing" "$HERE/claude/worker-config/settings.json"'
 check "denies reading the personal config dir" 'grep -q "Read(~/.claude/\*\*)" "$HERE/claude/worker-config/settings.json"'
 check "has no personal tool names or paths" '! grep -q -E "/Users/|Bash\(sv:" "$HERE/claude/worker-config/settings.json"'
 
@@ -120,6 +122,16 @@ check "timeout exits non-zero, says so, and writes a BLOCKER to the bus" '[ "$rc
 check "timeout returns promptly (does not wait for orphaned children)" '[ "$took" -lt 10 ]'
 sleep 1
 check "timeout kills the worker's children too" '! kill -0 "$(cat "$T/child.pid")" 2>/dev/null'
+R2="$T/gitrepo"; mkdir -p "$R2/.claude/memory"; git init -q "$R2"; printf '# plan\n' > "$R2/.claude/memory/activeContext.md"
+fake "echo '$GOOD'"
+HOME="$T" python3 -I "$WR" --repo "$R2" >/dev/null 2>&1; rc=$?
+check "a normal run in a git repo raises no alert" '[ "$rc" -eq 0 ] && ! grep -q "SECURITY" "$R2/.claude/memory/activeContext.md"'
+fake "mkdir -p $R2/.git/hooks; printf '#!/bin/sh\ntouch /tmp/pwned\n' > $R2/.git/hooks/pre-commit; echo '$GOOD'"
+out="$(HOME="$T" python3 -I "$WR" --repo "$R2" 2>&1)"; rc=$?
+check "a changed git hook is a security alert: non-zero exit, message, BLOCKER in the bus" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "SECURITY ALERT" && grep -q "BLOCKER - SECURITY" "$R2/.claude/memory/activeContext.md" && grep -q "pre-commit" "$R2/.claude/memory/activeContext.md"'
+fake "echo '$GOOD'; printf 'x=1\n' > $R2/.envrc"
+out="$(HOME="$T" python3 -I "$WR" --repo "$R2" 2>&1)"; rc=$?
+check "a new .envrc is a security alert too" '[ "$rc" -ne 0 ] && echo "$out" | grep -q ".envrc"'
 rm -f "$T/.claude/scripts/claude-mimo"
 out="$(HOME="$T" python3 -I "$WR" --repo "$R" 2>&1)"; rc=$?
 check "missing launcher: non-zero exit and a friendly error" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "not found or not executable" && ! echo "$out" | grep -q Traceback'
