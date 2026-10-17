@@ -18,7 +18,10 @@
         "~/.zsh_history",
         "~/.bash_history",
         "~/.claude",
-        "~/Library/Keychains"
+        "~/Library/Keychains",
+        "~/Library/Application Support",
+        "~/Library/Cookies",
+        "~/Library/Containers"
       ]
     },
     "network": {

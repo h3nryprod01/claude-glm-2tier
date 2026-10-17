@@ -38,7 +38,7 @@ check "re-install refreshes the worker policy and keeps a backup" 'cmp -s "$T/.c
 echo "worker policy (settings.json template)"
 check "valid JSON with the sandbox on" 'python3 -I -c "import json,sys; d=json.load(open(sys.argv[1])); s=d[\"sandbox\"]; assert s[\"enabled\"] and s[\"failIfUnavailable\"] and s[\"allowUnsandboxedCommands\"] is False and s[\"network\"][\"allowedDomains\"]==[]" "$HERE/claude/worker-config/settings.json"'
 check "no blanket interpreter/Read/Edit/Write allow" 'python3 -I -c "import json,sys; a=json.load(open(sys.argv[1]))[\"permissions\"][\"allow\"]; bad={\"Read\",\"Edit\",\"Write\",\"Bash(node:*)\",\"Bash(python3:*)\",\"Bash(cat:*)\"}; assert not (bad & set(a)), a" "$HERE/claude/worker-config/settings.json"'
-check "denies reading credential dirs in the sandbox" 'python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]))[\"sandbox\"][\"filesystem\"][\"denyRead\"]; assert {\"~/.ssh\",\"~/.aws\",\"~/.claude\",\"~/.config\",\"~/.kube\"} <= set(r), r" "$HERE/claude/worker-config/settings.json"'
+check "denies reading credential dirs in the sandbox" 'python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]))[\"sandbox\"][\"filesystem\"][\"denyRead\"]; assert {\"~/.ssh\",\"~/.aws\",\"~/.claude\",\"~/.config\",\"~/.kube\",\"~/Library/Keychains\",\"~/Library/Application Support\",\"~/Library/Cookies\",\"~/Library/Containers\"} <= set(r), r" "$HERE/claude/worker-config/settings.json"'
 check "denies reading the personal config dir" 'grep -q "Read(~/.claude/\*\*)" "$HERE/claude/worker-config/settings.json"'
 check "has no personal tool names or paths" '! grep -q -E "/Users/|Bash\(sv:" "$HERE/claude/worker-config/settings.json"'
 
