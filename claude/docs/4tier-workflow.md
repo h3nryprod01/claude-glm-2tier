@@ -107,11 +107,16 @@ From the desktop app, Main can launch `worker-run` itself in a real terminal tab
   once (Claude Code 2.1.301, macOS): 6 risky probes (read a canary under `~/.claude` with cat, the Read tool and
   node, write outside the repo, curl, read the provider key from env) were all denied, and the control
   command `npm test` ran. The permission layer stopped them, so the OS sandbox itself was not separately exercised.
-- **Persistence guard.** Edits to `.git/`, `.envrc`, `.husky/` and `.vscode/` are denied by policy, and
-  `worker-run` also hashes the git hooks/config and those paths before and after every run: any change is a
-  `BLOCKER - SECURITY` in the bus and a non-zero exit, because a modified hook would execute on YOUR machine
-  at your next commit. WebFetch/WebSearch are denied too (the Bash sandbox does not cover them). Edits made
-  by an interactive `claude-mimo` session are not hashed: review `git status` and `.git/hooks` yourself.
+- **Persistence guard (a tripwire, not a guarantee).** Edits to `.git/`, `.envrc`, `.husky/`, `.githooks/`,
+  `.vscode/`, `.devcontainer/`, `.idea/`, `.mcp.json` and `.claude/settings*.json` are denied by policy, and
+  `worker-run` fingerprints the git hooks and config (common dir, worktree dir, `core.hooksPath`) and those
+  paths before and after every run, without reading through symlinks or opening FIFOs/devices. Any change is a
+  `BLOCKER - SECURITY` in the bus and a non-zero exit, because a modified hook would execute on YOUR machine at
+  your next commit. The worker's process group is killed when it returns, so stragglers cannot edit after the
+  check, and an unreadable "after" state counts as an alert. It cannot know every auto-run file of every
+  toolchain (package.json scripts, Makefiles, CI files are reviewed in the diff instead). WebFetch/WebSearch
+  are denied too (the Bash sandbox does not cover them). Edits made by an interactive `claude-mimo` session
+  are not fingerprinted: check `git status` and `.git/hooks` yourself.
 - **Consequences:** `failIfUnavailable` means the worker will not start on a machine without sandbox
   support (Linux needs `bubblewrap` and `socat`); an empty `allowedDomains` blocks `npm/pip install`
   during verification (install dependencies yourself first); verify commands outside the allow-list (go,

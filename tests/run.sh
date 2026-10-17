@@ -41,6 +41,7 @@ check "no blanket interpreter/Read/Edit/Write allow" 'python3 -I -c "import json
 check "denies reading credential dirs in the sandbox" 'python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]))[\"sandbox\"][\"filesystem\"][\"denyRead\"]; assert {\"~/.ssh\",\"~/.aws\",\"~/.claude\",\"~/.config\",\"~/.kube\",\"~/Library/Keychains\",\"~/Library/Application Support\",\"~/Library/Cookies\",\"~/Library/Containers\"} <= set(r), r" "$HERE/claude/worker-config/settings.json"'
 check "denies persistence paths and non-Bash network tools" 'python3 -I -c "import json,sys; d=set(json.load(open(sys.argv[1]))[\"permissions\"][\"deny\"]); need={\"Edit(**/.git/**)\",\"Write(**/.git/**)\",\"Edit(**/.envrc)\",\"Edit(**/.husky/**)\",\"Edit(**/.vscode/**)\",\"WebFetch\",\"WebSearch\"}; assert need <= d, need - d" "$HERE/claude/worker-config/settings.json"'
 check "Read denies mirror the sandbox denyRead list" 'python3 -I -c "import json,sys; s=json.load(open(sys.argv[1])); d=s[\"permissions\"][\"deny\"]; names=s[\"sandbox\"][\"filesystem\"][\"denyRead\"]; bases=[r[5:-1].removesuffix(\"/**\") for r in d if r.startswith(\"Read(\")]; missing=[n for n in names if not any(n==b or n.startswith(b+\"/\") for b in bases)]; assert not missing, missing" "$HERE/claude/worker-config/settings.json"'
+check "denies edits to every watched auto-run path" 'python3 -I -c "import json,sys; d=set(json.load(open(sys.argv[1]))[\"permissions\"][\"deny\"]); need={f\"{t}(**/{x})\" for t in (\"Edit\",\"Write\") for x in (\".githooks/**\",\".devcontainer/**\",\".idea/**\",\".mcp.json\",\".claude/settings.json\",\".claude/settings.local.json\")}; assert need <= d, need - d" "$HERE/claude/worker-config/settings.json"'
 check "denies reading the personal config dir" 'grep -q "Read(~/.claude/\*\*)" "$HERE/claude/worker-config/settings.json"'
 check "has no personal tool names or paths" '! grep -q -E "/Users/|Bash\(sv:" "$HERE/claude/worker-config/settings.json"'
 
@@ -132,6 +133,25 @@ check "a changed git hook is a security alert: non-zero exit, message, BLOCKER i
 fake "echo '$GOOD'; printf 'x=1\n' > $R2/.envrc"
 out="$(HOME="$T" python3 -I "$WR" --repo "$R2" 2>&1)"; rc=$?
 check "a new .envrc is a security alert too" '[ "$rc" -ne 0 ] && echo "$out" | grep -q ".envrc"'
+R3="$T/repo3"; mkdir -p "$R3/.claude/memory" "$R3/.husky" "$R3/customhooks"; git init -q "$R3"; printf '# plan\n' > "$R3/.claude/memory/activeContext.md"
+git -C "$R3" config core.hooksPath customhooks; printf 'a\n' > "$R3/.husky/pre-commit"; printf 'a\n' > "$T/same-content"
+mkfifo "$R3/.husky/fifo"
+fake "echo '$GOOD'"
+t0=$SECONDS; HOME="$T" python3 -I "$WR" --repo "$R3" --timeout 20 >/dev/null 2>&1; rc=$?
+check "a FIFO in a watched dir neither hangs the snapshot nor raises a false alert" '[ "$rc" -eq 0 ] && [ $((SECONDS - t0)) -lt 10 ]'
+fake "echo '$GOOD'; printf 'evil\n' > $R3/customhooks/pre-push"
+out="$(HOME="$T" python3 -I "$WR" --repo "$R3" 2>&1)"; rc=$?
+check "a change under core.hooksPath is an alert" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "pre-push"'
+fake "echo '$GOOD'; rm $R3/.husky/pre-commit; ln -s $T/same-content $R3/.husky/pre-commit"
+out="$(HOME="$T" python3 -I "$WR" --repo "$R3" 2>&1)"; rc=$?
+check "swapping a watched file for a symlink with identical content is an alert (not read through)" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "pre-commit"'
+fake "echo '$GOOD'; printf '{}' > $R3/.claude/settings.json"
+out="$(HOME="$T" python3 -I "$WR" --repo "$R3" 2>&1)"; rc=$?
+check "a new .claude/settings.json is an alert" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "settings.json"'
+rm -f "$R3/.claude/settings.json"
+fake "( sleep 1; printf 'late\n' > $R3/.husky/late ) >/dev/null 2>&1 & echo '$GOOD'"
+HOME="$T" python3 -I "$WR" --repo "$R3" >/dev/null 2>&1; sleep 2
+check "stragglers are killed so they cannot edit after the check" '[ ! -e "$R3/.husky/late" ]'
 rm -f "$T/.claude/scripts/claude-mimo"
 out="$(HOME="$T" python3 -I "$WR" --repo "$R" 2>&1)"; rc=$?
 check "missing launcher: non-zero exit and a friendly error" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "not found or not executable" && ! echo "$out" | grep -q Traceback'

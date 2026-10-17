@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -76,48 +77,89 @@ def log_run(entry):
         fh.write(json.dumps(entry) + "\n")
 
 
-# Files that later execute code on YOUR machine (git hooks run at your next commit, .envrc/.husky/.vscode
-# at your next shell/commit/folder open). A worker has no business changing them, so a change is an alert.
-WATCH = [".envrc", ".vscode", ".husky"]
+# Files that later execute code on YOUR machine (git hooks run at your next commit, .envrc/.husky/.vscode/
+# .devcontainer at your next shell/commit/folder open, .claude/settings*.json and .mcp.json when you start
+# Claude Code in the repo). A worker has no business changing them, so a change is an alert. This is a
+# tripwire, not a guarantee: it cannot know every auto-run file of every toolchain.
+WATCH = [".envrc", ".vscode", ".husky", ".githooks", ".devcontainer", ".idea", ".mcp.json",
+         os.path.join(".claude", "settings.json"), os.path.join(".claude", "settings.local.json")]
+HASH_CAP = 8 * 1024 * 1024  # bytes read per file; bigger files are fingerprinted by size+mtime instead
+
+
+def _fingerprint(path):
+    """One entry per path. Never reads through symlinks or opens FIFOs/devices (that could hang or leak)."""
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        return f"unstatable:{e.errno}"
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            return "symlink->" + os.readlink(path)
+        except OSError:
+            return "symlink"
+    if not stat.S_ISREG(st.st_mode):
+        return f"special:{stat.S_IFMT(st.st_mode):o}"
+    if st.st_size > HASH_CAP:
+        return f"big:{st.st_size}:{int(st.st_mtime)}"
+    h = hashlib.sha256()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+    except OSError as e:
+        return f"unreadable:{e.errno}"
+    return h.hexdigest()
 
 
 def _digest_tree(path, skip_samples=False):
     out = {}
-    if os.path.isfile(path):
-        paths = [path]
-    else:
+    if not os.path.lexists(path):
+        return out
+    if os.path.isdir(path) and not os.path.islink(path):
         paths = [os.path.join(r, f) for r, _, fs in os.walk(path) for f in fs]
+        out[path + "/"] = "dir"
+    else:
+        paths = [path]
     for f in paths:
         if skip_samples and f.endswith(".sample"):
             continue
-        try:
-            with open(f, "rb") as fh:
-                out[f] = hashlib.sha256(fh.read()).hexdigest()
-        except OSError:
-            out[f] = "unreadable"
+        out[f] = _fingerprint(f)
     return out
 
 
+def _git(repo, *args):
+    r = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, timeout=20)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
 def code_exec_snapshot(repo):
-    """Hash git hooks/config and the repo files that auto-run on your machine."""
+    """Fingerprint git hooks/config (common dir, per-worktree dir, core.hooksPath) and the auto-run repo files."""
     snap = {}
-    try:
-        gd = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=repo, capture_output=True, text=True, timeout=20)
-        gitdir = os.path.abspath(os.path.join(repo, gd.stdout.strip())) if gd.returncode == 0 and gd.stdout.strip() else None
-    except (OSError, subprocess.SubprocessError):
-        gitdir = None
-    if gitdir:
-        snap.update(_digest_tree(os.path.join(gitdir, "hooks"), skip_samples=True))
-        snap.update(_digest_tree(os.path.join(gitdir, "config")))
+    for flag in ("--git-common-dir", "--git-dir"):
+        gd = _git(repo, "rev-parse", flag)
+        if gd:
+            base = os.path.abspath(os.path.join(repo, gd))
+            snap.update(_digest_tree(os.path.join(base, "hooks"), skip_samples=True))
+            for cfg in ("config", "config.worktree"):
+                snap.update(_digest_tree(os.path.join(base, cfg)))
+    hp = _git(repo, "config", "--get", "core.hooksPath")
+    if hp:
+        snap.update(_digest_tree(os.path.abspath(os.path.join(repo, os.path.expanduser(hp))), skip_samples=True))
     for rel in WATCH:
-        p = os.path.join(repo, rel)
-        if os.path.exists(p):
-            snap.update(_digest_tree(p))
+        snap.update(_digest_tree(os.path.join(repo, rel)))
     return snap
 
 
 def snapshot_diff(before, after):
     return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+
+
+def _kill_group(pid):
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def run_worker(cmd, repo, timeout):
@@ -126,12 +168,10 @@ def run_worker(cmd, repo, timeout):
                          stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
         out, err = p.communicate(timeout=timeout)
+        _kill_group(p.pid)  # stragglers must not keep editing after the after-snapshot
         return p.returncode, out, err, False
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _kill_group(p.pid)
         out, err = p.communicate()
         return None, out or "", err or "", True
 
@@ -159,11 +199,18 @@ def main():
     for rule in a.allow:
         cmd += ["--allowedTools", rule]
 
-    before = code_exec_snapshot(repo)
+    try:
+        before = code_exec_snapshot(repo)
+    except Exception as e:  # fail closed: without a baseline we cannot promise detection
+        sys.exit(f"worker-run: could not fingerprint the code-executing files ({e!r}); not running the worker")
     started = time.time()
     rc, stdout, stderr, timed_out = run_worker(cmd, repo, a.timeout)
     seconds = round(time.time() - started)
-    changed = snapshot_diff(before, code_exec_snapshot(repo))
+    time.sleep(0.3)
+    try:
+        changed = snapshot_diff(before, code_exec_snapshot(repo))
+    except Exception as e:  # fail closed: an unreadable "after" state is itself an alert
+        changed = [f"(snapshot failed after the run: {e!r})"]
     if changed:
         append_bus(bus, a.lane, "status: BLOCKER - SECURITY: files that execute code on your machine changed during the "
                                 "worker run (git hooks/config, .envrc, .husky, .vscode). Inspect and revert them before "

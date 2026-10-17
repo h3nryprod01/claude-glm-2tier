@@ -82,7 +82,19 @@
       "Edit(~/.claude-worker/**)",
       "Write(~/.claude-worker/**)",
       "WebFetch",
-      "WebSearch"
+      "WebSearch",
+      "Edit(**/.githooks/**)",
+      "Write(**/.githooks/**)",
+      "Edit(**/.devcontainer/**)",
+      "Write(**/.devcontainer/**)",
+      "Edit(**/.idea/**)",
+      "Write(**/.idea/**)",
+      "Edit(**/.mcp.json)",
+      "Write(**/.mcp.json)",
+      "Edit(**/.claude/settings.json)",
+      "Write(**/.claude/settings.json)",
+      "Edit(**/.claude/settings.local.json)",
+      "Write(**/.claude/settings.local.json)"
     ]
   }
 }
