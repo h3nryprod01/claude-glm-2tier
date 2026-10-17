@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""session-usage — token + cache-hit + MiMo PAYG cost estimate from Claude Code transcripts.
+
+usage:
+  session-usage [transcript.jsonl]          one transcript (default: newest), priced as MiMo-V2.6-Pro
+  session-usage --mimo [--days N] [--budget USD]
+                                            every transcript, only turns whose model is mimo-*,
+                                            priced per model, total vs. budget (default $10)
+Dedupes by message id (transcripts repeat usage per content block). `/cost` is useless on
+non-Anthropic providers because it prices tokens at Anthropic rates. The Balance page of
+platform.xiaomimimo.com is the source of truth; this is an estimate (cache-write billed as miss,
+which is the worst case: the vendor says cache write is free for a limited time).
+Subagent transcripts (<session>/subagents/*.jsonl) are included for a session. Background haiku-tier
+calls are not recorded in any transcript, so the estimate can undercount slightly.
+"""
+import argparse
+import glob
+import json
+import os
+import time
+
+PROJECTS = os.path.expanduser("~/.claude/projects")
+SKIP_DIR = os.environ.get("EXEC_SKIP_DIR", "")  # substring of transcript paths to ignore (optional)
+# USD per 1M tokens: (cache-miss input, cache-hit input, output).
+# Source: mimo.mi.com/docs/en-US/price/pay-as-you-go, overseas table, read 2026-10-17.
+PRICES = {"pro": (0.435, 0.0036, 0.87), "flash": (0.14, 0.0028, 0.28)}
+
+
+def tier(model):
+    return "flash" if "flash" in (model or "").lower() else "pro"
+
+
+def scan(path, only_mimo):
+    """Return {message id: (model, usage)} for one transcript."""
+    by_id = {}
+    for line in open(path, encoding="utf-8", errors="replace"):
+        try:
+            m = json.loads(line).get("message") or {}
+        except ValueError:
+            continue
+        if m.get("role") != "assistant" or not m.get("usage") or not m.get("id"):
+            continue
+        if m.get("model") == "<synthetic>":
+            continue
+        if only_mimo and "mimo" not in (m.get("model") or "").lower():
+            continue
+        by_id[m["id"]] = (m.get("model"), m["usage"])
+    return by_id
+
+
+def summarize(turns):
+    t = {"n": len(turns), "fresh": 0, "hit": 0, "write": 0, "out": 0, "think": 0, "cost": 0.0}
+    for model, u in turns.values():
+        fresh, hit = u.get("input_tokens", 0), u.get("cache_read_input_tokens", 0)
+        write, out = u.get("cache_creation_input_tokens", 0), u.get("output_tokens", 0)
+        p_in, p_hit, p_out = PRICES[tier(model)]
+        t["fresh"] += fresh
+        t["hit"] += hit
+        t["write"] += write
+        t["out"] += out
+        t["think"] += (u.get("output_tokens_details") or {}).get("thinking_tokens", 0)
+        t["cost"] += ((fresh + write) * p_in + hit * p_hit + out * p_out) / 1e6
+    return t
+
+
+def show(t):
+    prompt = t["fresh"] + t["hit"] + t["write"]
+    n = t["n"]
+    print(f"turns      : {n}")
+    print(f"input      : miss {t['fresh'] + t['write']:,} (new {t['fresh']:,} + cache-write {t['write']:,}) | hit {t['hit']:,}")
+    print(f"output     : {t['out']:,} (thinking {t['think']:,})")
+    print(f"cache hit  : {100 * t['hit'] / prompt:.1f}%" if prompt else "cache hit  : n/a")
+    if n:
+        print(f"per turn   : prompt {prompt // n:,} tokens | miss {(t['fresh'] + t['write']) // n:,} | output {t['out'] // n:,}")
+        print(f"est. cost  : ${t['cost']:.4f} total | ${1000 * t['cost'] / n:.2f} per 1k turns")
+
+
+def transcripts():
+    return [f for f in glob.glob(os.path.join(PROJECTS, "**", "*.jsonl"), recursive=True) if not (SKIP_DIR and SKIP_DIR in f)]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("path", nargs="?")
+    ap.add_argument("--mimo", action="store_true")
+    ap.add_argument("--days", type=float, default=0)
+    ap.add_argument("--budget", type=float, default=10.0)
+    a = ap.parse_args()
+
+    if not a.mimo:
+        path = a.path or max((f for f in transcripts() if "/subagents/" not in f), key=os.path.getmtime)
+        files = [path] + sorted(glob.glob(os.path.join(path[:-6], "subagents", "*.jsonl")))
+        print(f"transcript : {path} (+{len(files) - 1} subagent file(s))")
+        turns = {}
+        for f in files:
+            turns.update(scan(f, only_mimo=False))
+        show(summarize(turns))
+        for model in sorted({m for m, _ in turns.values()}):
+            s = summarize({k: v for k, v in turns.items() if v[0] == model})
+            print(f"  {model}: {s['n']} turns, ${s['cost']:.4f}")
+        return
+
+    cutoff = time.time() - a.days * 86400 if a.days else 0
+    grand, per_model, sessions = {}, {}, 0
+    for f in transcripts():
+        if cutoff and os.path.getmtime(f) < cutoff:
+            continue
+        turns = scan(f, only_mimo=True)
+        if not turns:
+            continue
+        sessions += 1
+        grand.update(turns)
+    for mid, (model, u) in grand.items():
+        per_model.setdefault(model, {})[mid] = (model, u)
+    print(f"MiMo sessions: {sessions}" + (f" (last {a.days:g} days)" if a.days else " (all time)"))
+    if not grand:
+        print("No mimo-* turns found yet.")
+        return
+    show(summarize(grand))
+    for model, turns in sorted(per_model.items()):
+        s = summarize(turns)
+        print(f"  {model}: {s['n']} turns, ${s['cost']:.4f}")
+    total = summarize(grand)["cost"]
+    print(f"budget     : ${a.budget:.2f} | est. spent ${total:.4f} | est. left ${a.budget - total:.2f}")
+    print("check      : compare with platform.xiaomimimo.com > Balance (that page is the truth)")
+
+
+main()

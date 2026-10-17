@@ -2,6 +2,10 @@
 description: "Offload code to GLM (separate pool) WITHIN this session; Opus self-verifies + reviews"
 argument-hint: <task; empty = execute the plan in activeContext.md>
 ---
+> **Legacy (GLM era).** This nests `claude-glm -p` inside a Bash tool call, which can hang, and its
+> "Do NOT run tests" line predates the worker rule that every step self-verifies. Prefer the loop
+> `/plan-handoff` -> worker `/glm-go` -> `/opus-review`.
+
 Offload the coding below to GLM to save Max quota, then verify and review it YOURSELF (don't trust GLM).
 
 Task: $ARGUMENTS

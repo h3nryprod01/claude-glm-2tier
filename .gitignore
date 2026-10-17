@@ -1,6 +1,7 @@
 # NEVER commit secrets
 .glm-key
 *.key
+.*-key
 *.token
 
 .DS_Store

@@ -1,0 +1,162 @@
+# Four-tier workflow: Main (Sonnet) + Worker (MiMo / GLM / Kimi) + Advisor (Opus) + Escalation (Fable)
+
+Goal: do the bulk of the typing on a cheap, separate billing pool, keep one mid-priced model in
+charge of the conversation, and spend the expensive model only on short, independent reviews.
+
+```
+                 1 GIT REPO   (.claude/memory/activeContext.md = handoff bus)
+
+  ┌────────────────────┐   plan    ┌──────────────────────┐
+  │ MAIN               │ ────────► │ WORKER               │
+  │ claude (Sonnet 5.5)│           │ claude-mimo          │
+  │ talks to you, plans│ ◄──────── │ (or claude-glm/-kimi)│
+  │ integrates, reports│  READY    │ code + tests, self-  │
+  └─────────┬──────────┘  _REVIEW  │ verifies, never      │
+            │                      │ reports "done"       │
+            │ diff + criteria      └──────────────────────┘
+            ▼
+  ┌────────────────────┐
+  │ ADVISOR            │   independent, read-only, fresh context every time
+  │ Opus 5.5 (Agent)   │   returns findings; Main fixes or hands the step back
+  └─────────┬──────────┘
+            │ only when the advisor is stuck:  ESCALATE: <question>
+            ▼
+  ┌────────────────────┐
+  │ ESCALATION         │   read-only, rare, most expensive
+  │ Fable 5.1 (Agent)  │   answers the stuck question; Main applies it
+  └────────────────────┘
+```
+
+| Tier | Runs as | Does | Never does |
+|---|---|---|---|
+| Main | your normal `claude` session on Sonnet 5.5 | talk to you, plan (`/plan-handoff`), integrate, report | accept the worker's word that tests are green |
+| Worker | `claude-mimo` in its own terminal (MiMo-V2.6-Pro, pay-as-you-go balance); alternates `claude-glm`, `claude-kimi` | execute the plan, run each `verify:`, write `READY_FOR_OPUS_REVIEW` + `executor:` | tell you "done"; touch files outside the plan; keep editing after READY |
+| Advisor | an Opus 5.5 subagent (`Agent` with `subagent_type: Plan` + `model: opus`; that agent type has no Edit/Write/Agent tools) | review the diff AFTER output, run the tests, list what is wrong/overstated, what was missed, and concrete fixes | see the worker's conclusions (it gets paths + criteria only); call other agents or edit files |
+| Escalation | a Fable 5.1 subagent (`Agent` with `subagent_type: Plan` + `model: fable`) | answer the one question the advisor could not settle | review routine diffs (too expensive); see the worker's or advisor's conclusions as facts |
+
+Small jobs (a few lines, questions, lookups) Main does itself. The advisor still reviews anything
+that produced output — skipping it "because it was small" is how bugs get through.
+
+## When to escalate to Fable
+
+Only when the Opus advisor is stuck. The advisor is told to end with a single line
+`ESCALATE: <specific question>` when it cannot reach a verdict, is unsure on a logic / security /
+money path, or two review rounds contradict each other. Main also escalates when one step has been
+handed back to the worker twice and is still wrong. Main then:
+
+1. writes the question, the paths, and what the advisor tried and where it got stuck (not the
+   conclusions it wants checked) into the prompt,
+2. launches `Agent` with `subagent_type: Plan` + `model: fable`,
+3. applies the answer, or sends the changed diff back through the Opus advisor,
+4. tells you it escalated and why.
+
+Routine reviews never go to Fable. Limits: at most ONE Fable consult per step; if the diff re-reviewed
+by the Opus advisor afterwards still ends in `ESCALATE:`, stop and ask the user. "Two review rounds
+contradict" is judged by Main (each advisor is a fresh subagent and never sees earlier verdicts).
+
+## Why this shape
+
+- The earlier two-tier split had an Opus tab for planning AND review. Measured over the full
+  transcript history, that tab burned more tokens than the worker did, because it was never
+  restarted and every review re-sent ~500k tokens of session history. Here the advisor is a fresh
+  subagent per review (a diff is a few KB), and the long-lived session is the cheaper Sonnet.
+- Sonnet/Haiku subagents draw from the same Claude pool as the main session, so they do not
+  relieve a weekly cap. Moving bulk work to a different pool (MiMo balance, GLM/Kimi plan) does.
+
+## One-time setup
+
+1. Worker key. For MiMo: sign up at platform.xiaomimimo.com, top up a small balance (do NOT enable
+   auto-recharge), create an `sk-...` key under Console > API Keys (not the `tp-...` Token Plan key).
+2. Store it without echoing it (the prompt hides what you paste):
+
+   ```bash
+   printf 'Paste MiMo key, then Enter: '; IFS= read -rs k; echo; printf '%s' "$k" | tr -d '[:space:]' > ~/.claude/.mimo-key && chmod 600 ~/.claude/.mimo-key; unset k
+   ```
+3. `EXEC_DRYRUN=1 claude-mimo` must print `ANTHROPIC_BASE_URL=https://api.xiaomimimo.com/anthropic`.
+
+## Daily loop
+
+1. **Main**: describe the task. `/plan-handoff <task>` writes goal + steps B1..Bn (each with a
+   `verify:` command) into `.claude/memory/activeContext.md`.
+2. **Worker**: open a terminal in the repo, run `claude-mimo`, type `/glm-go` (legacy name; it is
+   provider-agnostic). It reads the plan, executes, self-verifies, writes `READY_FOR_OPUS_REVIEW`.
+3. **Main**: `/opus-review` snapshots the tree, launches the Opus advisor on the diff, re-snapshots,
+   fixes CRITICAL/HIGH (or hands the step back to the worker), escalates to Fable only if the
+   advisor says `ESCALATE:`, records one scorecard line, and reports to you — including what the
+   advisor caught.
+
+From the desktop app, Main can also launch the worker itself in a real terminal tab
+(`claude-mimo -p "<prompt>"`); never run `claude -p` nested inside a Bash tool call, it hangs.
+
+## Rules that keep it safe and cheap
+
+- **No real data on the worker.** Hooks, CLAUDE.md and personal memory are still loaded by
+  `claude-mimo`, and everything goes to the provider. Personal data (PII), `.env`, secrets, production
+  data: never on the worker. Use a repo or copy without them.
+- **One worker per repo.** Two executors in one tree means the review reads a moving tree.
+- **No automatic failover** on 429 or an empty balance: the worker writes `status: BLOCKER` and
+  stops. Switch lane by hand (`claude-glm`, `claude-kimi`) or let Main do it. Automatic switching
+  would also destroy the comparison `exec-scorecard` collects.
+- **Cache is the cost lever on MiMo.** A cache miss costs 120x a cache hit; compact and fresh
+  subagents break the cache. Keep worker sessions focused. Auto-compact is set to 400k for MiMo.
+- **Headless runs (`claude-mimo -p`) cannot write the bus file.** Claude Code treats `.claude/` as a
+  sensitive path and denies edits there in `-p` mode even with `--permission-mode acceptEdits`
+  (observed 2026-10-17: the worker finished and verified the code, then stopped with `BLOCKER`
+  instead of updating `activeContext.md`). For headless runs, have the worker print its status
+  block as the final answer and let Main write it to the bus; in interactive `claude-mimo` you
+  approve the write.
+- **Your global hooks run in the worker too** (in the same trial they scaffolded `.codegraph/`,
+  `.cursor/` and `.claude/memory/*.md` files). Expect noise in `git status`, and see the data rule above.
+- **Track spend**: `python3 ~/.claude/scripts/session-usage --mimo --budget 10` (estimate; transcripts can undercount output tokens, ~25% in one run, so the
+  provider's Balance page is the truth). `/cost` is meaningless on non-Anthropic providers.
+- **Compare lanes**: `exec-scorecard --days 14` once there are >= 5 reviews per lane.
+
+## `.claude/memory/activeContext.md` template (the handoff bus)
+
+```markdown
+# Active Context — <repo>
+
+## Goal
+<1-2 sentences>
+
+## Plan  (Main writes)
+- [ ] B1: … — verify: <command / expected result>
+- [ ] B2: … — verify: …
+
+## Status  (Worker updates)
+- status: PLANNING | WORKER_EXECUTING | READY_FOR_OPUS_REVIEW | BLOCKER | DONE
+- executor: <model name>
+- files changed:
+- test/lint:
+
+## NOTES FOR ADVISOR / BLOCKER
+<Worker writes questions or uncertainties here instead of guessing>
+```
+
+Rewrite the Goal / Plan / Status block in place each cycle; move finished work to `progress.md`.
+This file is a bus, not a log.
+
+## Worker lanes
+
+`claude-mimo`, `claude-glm`, `claude-kimi` are symlinks to one script, `claude-exec`; only the
+endpoint, key file and model names differ. Env is set per process, never in `settings.json`.
+
+| Lane | Endpoint | Key | Billing | Model |
+|---|---|---|---|---|
+| mimo | `https://api.xiaomimimo.com/anthropic` | `~/.claude/.mimo-key` (`sk-`) | pay-as-you-go balance | `mimo-v2.6-pro[1m]` |
+| glm | `https://api.z.ai/api/anthropic` | `~/.claude/.glm-key` | Coding Plan (credits, 5h + weekly caps) | `glm-5.2[1m]` (routed to 5.3 by the provider) |
+| kimi | `https://api.kimi.com/coding/` | `~/.claude/.kimi-key` | Kimi Code subscription | `k3[1m]` |
+
+Traps: MiMo's `tp-` Token Plan keys belong to a different host (`token-plan-*`) than the `sk-` API
+key; Kimi has an Open Platform endpoint that bills per token and a subscription endpoint that does
+not. The launcher refuses a MiMo key that is not `sk-` and strips inherited Anthropic credentials
+before launching, so your Anthropic key/OAuth token is never sent to a third-party host.
+
+| Want | Command |
+|---|---|
+| Main | `claude` |
+| Worker (default) | `claude-mimo` |
+| Other lanes | `claude-glm`, `claude-kimi` |
+| See the env a lane would use | `EXEC_DRYRUN=1 claude-mimo` |
+| Override a model | `MIMO_MODEL=mimo-v2.6-flash claude-mimo` (in one informal trial on 2026-10-17 Flash was slow and over-verbose on a one-word prompt; Pro is the default) |
+| If tool calls leak into reasoning text | `MAX_THINKING_TOKENS=0 claude-mimo` |

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# claude-exec — run Claude Code against a NON-Anthropic provider, as the WORKER tier of the
+# four-tier workflow (Main Sonnet -> Worker -> Opus advisor -> Fable escalation). Main stays plain `claude`.
+#
+# Provider is chosen by the name you invoke: `claude-glm` / `claude-kimi` / `claude-mimo` are symlinks here.
+# Override with EXEC_PROVIDER=<name>. One file, not one per provider — two copies drift, and
+# every fix (see the two easy-to-miss vars below) would have to be made twice.
+#
+# NOTE: env is set PER-PROCESS, never written to ~/.claude/settings.json — that file is global
+#       and would turn EVERY session into the worker, collapsing the tier split.
+set -euo pipefail
+
+ROLE_FILE="$HOME/.claude/executor-role.md"
+
+provider="${EXEC_PROVIDER:-}"
+if [[ -z "$provider" ]]; then
+  provider="$(basename "$0")"
+  provider="${provider#claude-}"
+fi
+
+# Reset per-provider knobs so a value exported in the parent shell can't leak in.
+AUTH_VAR=""
+COMPACT_WINDOW=""
+EXTRA_ENV=()
+
+case "$provider" in
+  glm)
+    BASE_URL="https://api.z.ai/api/anthropic"
+    KEY_FILE="$HOME/.claude/.glm-key"
+    BIG_MODEL="${GLM_MODEL:-glm-5.2[1m]}"
+    SMALL_MODEL="glm-4.5-air"
+    KEY_HELP="Buy a Coding Plan at https://z.ai/subscribe, create an API key in the Z.ai dashboard."
+    ;;
+  kimi)
+    # MUST be api.kimi.com/coding — that is the SUBSCRIPTION endpoint.
+    # api.moonshot.ai/anthropic is the Open Platform and bills PER TOKEN. Same vendor,
+    # same-looking key, completely different bill. Do not "simplify" this back.
+    BASE_URL="https://api.kimi.com/coding/"
+    KEY_FILE="$HOME/.claude/.kimi-key"
+    # k3[1m] = 1M-context variant, what Kimi's own Claude Code guide specifies.
+    # Lower plan tiers may only accept `kimi-for-coding` — override with KIMI_MODEL.
+    BIG_MODEL="${KIMI_MODEL:-k3[1m]}"
+    SMALL_MODEL="$BIG_MODEL"
+    # Kimi's endpoint has no Tool Search; leaving it on breaks tool calls.
+    EXTRA_ENV=("ENABLE_TOOL_SEARCH=false" "CLAUDE_CODE_EFFORT_LEVEL=high")
+    AUTH_VAR="ANTHROPIC_API_KEY"
+    KEY_HELP="1) Subscribe: https://www.kimi.com/membership/pricing
+   2) Create the key in the Kimi Code Console: https://www.kimi.com/code/console
+   NOT platform.kimi.ai / Open Platform — those keys bill per token. Kimi Code keys
+   bill against the flat monthly plan."
+    ;;
+  mimo)
+    # Pay-as-you-go MiMo API (key sk-), NOT the Token Plan (host token-plan-*, key tp-).
+    # Chosen for the trial: no subscription, no auto-renew, spend capped by the balance you top up.
+    BASE_URL="https://api.xiaomimimo.com/anthropic"
+    KEY_FILE="$HOME/.claude/.mimo-key"
+    # [1m] = 1M-context variant (verify with /context). Old v2.5 ids stop working 2026-10-21.
+    BIG_MODEL="${MIMO_MODEL:-mimo-v2.6-pro[1m]}"
+    # Small tier = BIG until mimo-v2.6-flash is confirmed on the /anthropic endpoint
+    # (official sample also maps haiku to pro). Try: MIMO_SMALL_MODEL=mimo-v2.6-flash claude-mimo
+    SMALL_MODEL="${MIMO_SMALL_MODEL:-$BIG_MODEL}"
+    # Cache misses cost 120x cache hits, and long-context accuracy is unverified: compact earlier.
+    COMPACT_WINDOW="${MIMO_COMPACT_WINDOW:-400000}"
+    EXTRA_ENV=("ENABLE_TOOL_SEARCH=false" "ANTHROPIC_MODEL=$BIG_MODEL")
+    KEY_HELP="1) Sign up + top up a small balance: https://platform.xiaomimimo.com (Balance page)
+   2) Create the key at Console > API Keys (format sk-...). NOT the Token Plan key (tp-...).
+   3) Store it without echoing it (the prompt hides what you paste):
+      printf 'Paste MiMo key, then Enter: '; IFS= read -rs k; echo; printf '%s' \"\$k\" | tr -d '[:space:]' > $KEY_FILE && chmod 600 $KEY_FILE; unset k"
+    ;;
+  *)
+    echo "❌ Unknown provider: '$provider'" >&2
+    echo "   Valid: glm, kimi, mimo. Invoke as claude-glm / claude-kimi / claude-mimo, or set EXEC_PROVIDER." >&2
+    exit 1
+    ;;
+esac
+
+if [[ ! -s "$KEY_FILE" ]]; then
+  echo "❌ No $provider key in $KEY_FILE" >&2
+  echo "   $KEY_HELP" >&2
+  echo "   Then paste ONLY the key (one line) into $KEY_FILE" >&2
+  exit 1
+fi
+KEY="$(tr -d '[:space:]' < "$KEY_FILE")"
+if [[ "$provider" == mimo && "$KEY" != sk-* ]]; then
+  echo "❌ $KEY_FILE does not look like a pay-as-you-go key (sk-...). Token Plan keys (tp-...) belong to a different host." >&2
+  exit 1
+fi
+
+# The executor doesn't need MCP, and loading every server overflowed the context window.
+args=(--strict-mcp-config)
+[[ -f "$ROLE_FILE" ]] && args+=(--append-system-prompt-file "$ROLE_FILE")
+
+# BIG_MODEL covers every tier Claude Code might reach for. CLAUDE_CODE_SUBAGENT_MODEL is the
+# easy one to miss: without it, a subagent spawned inside Tab B falls back to the default
+# model — i.e. silently leaks work back onto the Claude pool this whole setup exists to spare.
+env_vars=(
+  "ANTHROPIC_BASE_URL=$BASE_URL"
+  "${AUTH_VAR:-ANTHROPIC_AUTH_TOKEN}=$KEY"
+  "API_TIMEOUT_MS=3000000"
+  "ANTHROPIC_DEFAULT_OPUS_MODEL=$BIG_MODEL"
+  "ANTHROPIC_DEFAULT_SONNET_MODEL=$BIG_MODEL"
+  "ANTHROPIC_DEFAULT_FABLE_MODEL=$BIG_MODEL"
+  "CLAUDE_CODE_SUBAGENT_MODEL=$BIG_MODEL"
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL=$SMALL_MODEL"
+  "CLAUDE_CODE_AUTO_COMPACT_WINDOW=${COMPACT_WINDOW:-1000000}"
+)
+env_vars+=(${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"})
+
+if [[ -n "${EXEC_DRYRUN:-}" ]]; then
+  echo "provider=$provider"
+  for e in "${env_vars[@]}"; do
+    [[ "$e" == ANTHROPIC_AUTH_TOKEN=* ]] && e="ANTHROPIC_AUTH_TOKEN=<redacted>"
+    [[ "$e" == ANTHROPIC_API_KEY=* ]] && e="ANTHROPIC_API_KEY=<redacted>"
+    echo "$e"
+  done
+  printf 'args=%s\n' "${args[*]}"
+  exit 0
+fi
+
+# -u first: `env` only ADDS vars, so any Anthropic credential inherited from the parent shell
+# (API key, OAuth token) would otherwise be sent to the third-party host.
+exec env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN "${env_vars[@]}" claude ${args[@]+"${args[@]}"} "$@"

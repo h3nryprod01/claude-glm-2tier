@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""exec-scorecard — compare worker lanes (GLM, Kimi, MiMo) on real work.
+
+Two sources, because no single one has the whole picture:
+  - ~/.claude/exec-scorecard.jsonl  : what /opus-review found (quality, rework)
+  - ~/.claude/projects/**/*.jsonl   : what the provider did (turns, tokens, 429s)
+
+Usage: exec-scorecard [--days N]
+"""
+import argparse
+import collections
+import glob
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+CARD = os.path.expanduser("~/.claude/exec-scorecard.jsonl")
+PROJECTS = os.path.expanduser("~/.claude/projects")
+# The summarizer pastes other sessions' transcripts into its own prompts, so anything
+# counted there is an echo, not a real event. Same trap that inflated the 2026-08-01 audit.
+SKIP_DIR = os.environ.get("EXEC_SKIP_DIR", "")  # substring of transcript paths to ignore (optional)
+
+FAMILIES = ("glm", "kimi", "mimo")
+
+
+def family(model: str) -> str:
+    m = (model or "").lower()
+    if m.startswith("k3"):  # Kimi's model id is k3[1m]; it never contains the word "kimi"
+        return "kimi"
+    for f in FAMILIES:
+        if f in m:
+            return f
+    return ""
+
+
+def read_reviews(cutoff):
+    """Quality signal, written by /opus-review. Bad lines are skipped, never fatal."""
+    rows, broken = [], 0
+    try:
+        fh = open(CARD, encoding="utf-8")
+    except FileNotFoundError:
+        return rows, broken
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+                fam = family(r.get("executor", ""))
+                if not fam:
+                    broken += 1
+                    continue
+                if cutoff and (r.get("ts") or "") < cutoff:
+                    continue
+                rows.append((fam, r))
+            except Exception:
+                broken += 1
+    return rows, broken
+
+
+def scan_transcripts(cutoff_ts):
+    """Volume + rate-limit signal, straight from the transcripts."""
+    turns = collections.Counter()
+    tokens = collections.Counter()
+    blocked = collections.Counter()
+    for f in glob.glob(os.path.join(PROJECTS, "**", "*.jsonl"), recursive=True):
+        if SKIP_DIR and SKIP_DIR in f:
+            continue
+        try:
+            if cutoff_ts and os.path.getmtime(f) < cutoff_ts:
+                continue
+            with open(f, encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    if '"usage"' not in line and "429" not in line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except Exception:
+                        continue
+                    msg = d.get("message") or {}
+                    fam = family(msg.get("model") or d.get("model") or "")
+                    if not fam:
+                        continue
+                    u = msg.get("usage") or {}
+                    if u:
+                        turns[fam] += 1
+                        tokens[fam] += sum(u.get(k, 0) for k in (
+                            "input_tokens", "cache_read_input_tokens",
+                            "cache_creation_input_tokens", "output_tokens"))
+                    if "429" in line and "rate" in line.lower():
+                        blocked[fam] += 1
+        except Exception:
+            continue
+    return turns, tokens, blocked
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--days", type=int, default=0, help="only the last N days (0 = all)")
+    a = ap.parse_args()
+
+    cutoff = cutoff_ts = None
+    if a.days:
+        dt = datetime.now(timezone.utc) - timedelta(days=a.days)
+        cutoff, cutoff_ts = dt.isoformat(), dt.timestamp()
+
+    reviews, broken = read_reviews(cutoff)
+    turns, tokens, blocked = scan_transcripts(cutoff_ts)
+
+    window = f"last {a.days}d" if a.days else "all time"
+    print(f"\nExecutor scorecard — {window}\n")
+
+    if not reviews and not turns:
+        print("  No data yet. Run work through claude-mimo / claude-glm / claude-kimi, and let")
+        print("  /opus-review write its scorecard line after each handoff.\n")
+        return
+
+    labels = {"glm": "GLM", "kimi": "Kimi", "mimo": "MiMo"}
+    hdr = f"{'':16}" + "".join(f"{labels.get(f, f):>14}" for f in FAMILIES)
+    print(hdr)
+    print("-" * len(hdr))
+
+    def row(label, vals, fmt="{:,}"):
+        cells = "".join(f"{(fmt.format(v) if v is not None else '—'):>14}" for v in vals)
+        print(f"{label:16}{cells}")
+
+    row("turns", [turns.get(f, 0) for f in FAMILIES])
+    row("tokens", [tokens.get(f, 0) for f in FAMILIES])
+    row("429 hits", [blocked.get(f, 0) for f in FAMILIES])
+    row("429 per 1k", [round(1000 * blocked.get(f, 0) / turns[f], 1) if turns.get(f) else None
+                       for f in FAMILIES], "{}")
+
+    print()
+    n = {f: [r for fam, r in reviews if fam == f] for f in FAMILIES}
+    row("reviews", [len(n[f]) for f in FAMILIES])
+    for key in ("critical", "high"):
+        row(f"{key}/review", [round(sum(r.get(key, 0) for r in n[f]) / len(n[f]), 2)
+                              if n[f] else None for f in FAMILIES], "{}")
+    row("rework %", [round(100 * sum(1 for r in n[f] if r.get("rework")) / len(n[f]))
+                     if n[f] else None for f in FAMILIES], "{}%")
+
+    thin = [f for f in FAMILIES if len(n[f]) < 5]
+    if thin:
+        print(f"\n  Too few reviews to conclude for: {', '.join(thin)} "
+              f"(want >=5 each). Keep using the lanes you are comparing.")
+    if broken:
+        print(f"  {broken} unparseable line(s) in {CARD} — skipped.")
+    print("\n  Lower is better on every row except turns/tokens.\n")
+
+
+if __name__ == "__main__":
+    main()
