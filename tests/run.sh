@@ -149,6 +149,25 @@ fake "echo '$GOOD'; printf '{}' > $R3/.claude/settings.json"
 out="$(HOME="$T" python3 -I "$WR" --repo "$R3" 2>&1)"; rc=$?
 check "a new .claude/settings.json is an alert" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "settings.json"'
 rm -f "$R3/.claude/settings.json"
+printf 'v1\n' > "$T/linktarget"; ln -s "$T/linktarget" "$R3/.husky/linked"
+fake "echo '$GOOD'; printf 'v2-evil\n' > $T/linktarget"
+out="$(HOME="$T" python3 -I "$WR" --repo "$R3" 2>&1)"; rc=$?
+check "changing the CONTENT behind a watched symlink is an alert" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "linked"'
+rm -f "$R3/.husky/linked"
+mkdir -p "$T/realhooks"; printf 'ok\n' > "$T/realhooks/pre-merge"; ln -s "$T/realhooks" "$R3/.githooks"
+fake "echo '$GOOD'; printf 'evil\n' > $T/realhooks/pre-merge"
+out="$(HOME="$T" python3 -I "$WR" --repo "$R3" 2>&1)"; rc=$?
+check "a symlinked watched directory is walked through its target" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "pre-merge"'
+rm -f "$R3/.githooks"
+python3 -I -c "import sys; open(sys.argv[1],'wb').write(b'a'*(9*1024*1024))" "$R3/.husky/big"; touch -r "$HERE/install.sh" "$R3/.husky/big"
+fake "echo '$GOOD'; python3 -I -c \"import sys; f=open(sys.argv[1],'r+b'); f.seek(5000000); f.write(b'Z'); f.close()\" $R3/.husky/big; touch -r $HERE/install.sh $R3/.husky/big"
+out="$(HOME="$T" python3 -I "$WR" --repo "$R3" 2>&1)"; rc=$?
+check "a same-size, same-mtime edit of a big watched file is still an alert" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "big"'
+rm -f "$R3/.husky/big"
+mkdir -p "$R3/sub/.claude/memory" "$R3/customhooks"; printf '# plan\n' > "$R3/sub/.claude/memory/activeContext.md"
+fake "echo '$GOOD'; printf 'evil\n' > $R3/customhooks/pre-rebase"
+out="$(HOME="$T" python3 -I "$WR" --repo "$R3/sub" 2>&1)"; rc=$?
+check "run from a subdirectory still watches the effective hooks dir (relative core.hooksPath)" '[ "$rc" -ne 0 ] && echo "$out" | grep -q "pre-rebase"'
 fake "( sleep 1; printf 'late\n' > $R3/.husky/late ) >/dev/null 2>&1 & echo '$GOOD'"
 HOME="$T" python3 -I "$WR" --repo "$R3" >/dev/null 2>&1; sleep 2
 check "stragglers are killed so they cannot edit after the check" '[ ! -e "$R3/.husky/late" ]'

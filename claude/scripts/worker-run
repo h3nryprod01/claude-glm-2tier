@@ -80,45 +80,73 @@ def log_run(entry):
 # Files that later execute code on YOUR machine (git hooks run at your next commit, .envrc/.husky/.vscode/
 # .devcontainer at your next shell/commit/folder open, .claude/settings*.json and .mcp.json when you start
 # Claude Code in the repo). A worker has no business changing them, so a change is an alert. This is a
-# tripwire, not a guarantee: it cannot know every auto-run file of every toolchain.
+# tripwire, not a guarantee: it cannot know every auto-run file of every toolchain, and a descendant that
+# detaches into its own session can outlive the group kill (macOS has no cgroups to contain it).
 WATCH = [".envrc", ".vscode", ".husky", ".githooks", ".devcontainer", ".idea", ".mcp.json",
          os.path.join(".claude", "settings.json"), os.path.join(".claude", "settings.local.json")]
-HASH_CAP = 8 * 1024 * 1024  # bytes read per file; bigger files are fingerprinted by size+mtime instead
+MAX_ENTRIES = 20000  # files walked per watched tree; beyond this the tree is fingerprinted as "truncated"
 
 
-def _fingerprint(path):
-    """One entry per path. Never reads through symlinks or opens FIFOs/devices (that could hang or leak)."""
-    try:
-        st = os.lstat(path)
-    except OSError as e:
-        return f"unstatable:{e.errno}"
-    if stat.S_ISLNK(st.st_mode):
-        try:
-            return "symlink->" + os.readlink(path)
-        except OSError:
-            return "symlink"
-    if not stat.S_ISREG(st.st_mode):
-        return f"special:{stat.S_IFMT(st.st_mode):o}"
-    if st.st_size > HASH_CAP:
-        return f"big:{st.st_size}:{int(st.st_mtime)}"
+def _hash_regular(path):
+    """Stream-hash a regular file (bounded memory, any size). Never follows a final symlink, never blocks on FIFOs."""
     h = hashlib.sha256()
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as fh:
-            for chunk in iter(lambda: fh.read(65536), b""):
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
                 h.update(chunk)
     except OSError as e:
         return f"unreadable:{e.errno}"
     return h.hexdigest()
 
 
+def _fingerprint(path):
+    """One entry per path. Special files are labelled, never opened. A symlink is fingerprinted by its link
+    value AND by what it points to, so changing the target's content is detected."""
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        return f"unstatable:{e.errno}"
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            link = os.readlink(path)
+            real = os.path.realpath(path)
+            tst = os.stat(real)
+        except OSError:
+            return "symlink(dangling)"
+        if stat.S_ISREG(tst.st_mode):
+            return f"symlink->{link}|{_hash_regular(real)}"
+        return f"symlink->{link}|nonregular:{stat.S_IFMT(tst.st_mode):o}"
+    if not stat.S_ISREG(st.st_mode):
+        return f"special:{stat.S_IFMT(st.st_mode):o}"
+    return _hash_regular(path)
+
+
+def _walk_files(root):
+    n = 0
+    for r, _, fs in os.walk(root):  # os.walk does not descend into symlinked dirs
+        for f in fs:
+            n += 1
+            if n > MAX_ENTRIES:
+                return
+            yield os.path.join(r, f)
+
+
 def _digest_tree(path, skip_samples=False):
     out = {}
     if not os.path.lexists(path):
         return out
-    if os.path.isdir(path) and not os.path.islink(path):
-        paths = [os.path.join(r, f) for r, _, fs in os.walk(path) for f in fs]
+    if os.path.islink(path) and os.path.isdir(path):
+        # a symlinked directory: record the link and fingerprint the resolved tree, keyed by resolved path
+        out[path] = "symlink->" + os.readlink(path)
+        real = os.path.realpath(path)
+        for f in _walk_files(real):
+            if not (skip_samples and f.endswith(".sample")):
+                out[f] = _fingerprint(f)
+        return out
+    if os.path.isdir(path):
         out[path + "/"] = "dir"
+        paths = list(_walk_files(path))
     else:
         paths = [path]
     for f in paths:
@@ -134,8 +162,10 @@ def _git(repo, *args):
 
 
 def code_exec_snapshot(repo):
-    """Fingerprint git hooks/config (common dir, per-worktree dir, core.hooksPath) and the auto-run repo files."""
+    """Fingerprint git hooks/config (common dir, worktree dir, the EFFECTIVE hooks dir incl. core.hooksPath)
+    and the auto-run repo files, at both the given dir and the repository top level."""
     snap = {}
+    top = _git(repo, "rev-parse", "--show-toplevel") or repo
     for flag in ("--git-common-dir", "--git-dir"):
         gd = _git(repo, "rev-parse", flag)
         if gd:
@@ -143,11 +173,15 @@ def code_exec_snapshot(repo):
             snap.update(_digest_tree(os.path.join(base, "hooks"), skip_samples=True))
             for cfg in ("config", "config.worktree"):
                 snap.update(_digest_tree(os.path.join(base, cfg)))
-    hp = _git(repo, "config", "--get", "core.hooksPath")
+    eff = _git(repo, "rev-parse", "--git-path", "hooks")  # git applies core.hooksPath here
+    if eff:
+        snap.update(_digest_tree(os.path.abspath(os.path.join(repo, eff)), skip_samples=True))
+    hp = _git(repo, "config", "--get", "core.hooksPath")  # belt and braces: resolve against the top level
     if hp:
-        snap.update(_digest_tree(os.path.abspath(os.path.join(repo, os.path.expanduser(hp))), skip_samples=True))
-    for rel in WATCH:
-        snap.update(_digest_tree(os.path.join(repo, rel)))
+        snap.update(_digest_tree(os.path.abspath(os.path.join(top, os.path.expanduser(hp))), skip_samples=True))
+    for root in dict.fromkeys([repo, top]):
+        for rel in WATCH:
+            snap.update(_digest_tree(os.path.join(root, rel)))
     return snap
 
 
@@ -206,7 +240,7 @@ def main():
     started = time.time()
     rc, stdout, stderr, timed_out = run_worker(cmd, repo, a.timeout)
     seconds = round(time.time() - started)
-    time.sleep(0.3)
+    time.sleep(1.5)  # grace for stragglers that outlive the group kill; then check
     try:
         changed = snapshot_diff(before, code_exec_snapshot(repo))
     except Exception as e:  # fail closed: an unreadable "after" state is itself an alert
