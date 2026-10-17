@@ -22,7 +22,7 @@ Don't code. Write a plan into .claude/memory/activeContext.md:
 ## ② Worker EXECUTES — paste into `claude-mimo` (or `claude-glm` / `claude-kimi`)
 
 ```
-Read .claude/memory/activeContext.md and execute the plan step by step. Run each step's `verify:`;
+Read .claude/memory/activeContext.md and execute the plan step by step. (Hands-off headless pass: run `worker-run --repo .` instead; it handles the report and the bus.) Run each step's `verify:`;
 not green, not done. When done: set status READY_FOR_OPUS_REVIEW + executor: <your model> +
 files changed + real test output. Do not report "done" — you are the hands. If stuck (including
 rate-limited or out of balance), write BLOCKER into the file and stop.

@@ -10,6 +10,11 @@ Main has reported. Therefore:
 - If that file is missing or has no clear plan, STOP and write into it: `status: BLOCKER` + a question for Main.
   Do not invent a plan and start coding.
 
+## Headless runs (`worker-run`)
+- Claude Code blocks edits under `.claude/` in headless (-p) mode, so you cannot update `activeContext.md`.
+  If your prompt says HEADLESS MODE, do NOT try: print the status report as your final answer instead
+  (the wrapper records it in the bus). In an interactive session, update the file as described below.
+
 ## While executing
 - Follow the repo's CLAUDE.md: surgical (touch only what's needed), simplicity-first, no refactoring beyond the ask.
 - Self-verify EVERY step: run tests / typecheck / lint. A step isn't done until it's green.

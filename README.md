@@ -59,8 +59,9 @@ cd claude-glm-2tier
 ./install.sh
 ```
 
-The installer copies into `~/.claude/` (launcher, role card, slash commands, docs, helper scripts) and
-symlinks `claude-mimo`, `claude-glm`, `claude-kimi` into `~/.local/bin`. Your
+The installer copies into `~/.claude/` (launcher, role card, slash commands, docs, helper scripts), creates the
+isolated worker config in `~/.claude-worker`, and symlinks `claude-mimo`, `claude-glm`, `claude-kimi`,
+`worker-run`, `exec-scorecard`, `session-usage` into `~/.local/bin`. Run `./tests/run.sh` for the offline test suite. Your
 `~/.claude/settings.json` is **not** touched, and an existing key file is never overwritten.
 
 Then set up one lane. For MiMo:
@@ -92,8 +93,10 @@ findings (or hands the step back to the worker) and re-checks the fix, escalates
 advisor says `ESCALATE:` (at most once per step), appends one
 scorecard line, and reports what the advisor caught.
 
-From the Claude desktop app, Main can also start the worker in a real terminal tab
-(`claude-mimo -p "<prompt>"`). **Do not run `claude -p` nested inside a Bash tool call** — it hangs.
+For a hands-off headless pass use `worker-run --repo .`: the worker prints its report, the wrapper appends
+it to `activeContext.md` (Claude Code refuses edits under `.claude/` in `-p` mode) and logs the run's exact
+token usage. From the Claude desktop app, Main can launch it in a real terminal tab. **Do not run
+`claude -p` nested inside a Bash tool call** — it hangs.
 
 Full loop, rules, and the `activeContext.md` template: [`claude/docs/4tier-workflow.md`](claude/docs/4tier-workflow.md)
 and [`claude/docs/handoff-prompts.md`](claude/docs/handoff-prompts.md). The original measurements and
@@ -102,12 +105,14 @@ Kimi endpoint notes are kept in [`claude/docs/2tier-workflow.md`](claude/docs/2t
 ### Measuring a lane
 
 ```bash
-python3 ~/.claude/scripts/session-usage --mimo --budget 10   # tokens, cache-hit %, cost estimate
+session-usage --log                                           # exact numbers from headless runs
+session-usage --mimo --budget 10                              # estimate from transcripts, both config dirs
 exec-scorecard --days 14                                      # lanes compared on real reviews (installed on PATH)
 ```
 
-`/cost` is meaningless on non-Anthropic providers (it prices tokens at Anthropic rates), and the
-provider's own balance page is the source of truth; `session-usage` is an estimate.
+`/cost` is meaningless on non-Anthropic providers (it prices tokens at Anthropic rates). Transcripts
+undercount output tokens (about 25% in one run), so the provider's balance page is the source of truth
+for interactive sessions; headless runs logged by `worker-run` are exact.
 
 ### Background jobs and third-opinion review (GLM-era extras)
 
@@ -130,9 +135,13 @@ an independent review from a different vendor (Codex) through `codex exec review
 
 ## Rules that matter
 
-- **No real data on the worker.** `claude-mimo` still loads your hooks, CLAUDE.md and personal
-  memory, and everything goes to the provider. Never put PII, `.env`, secrets or production data
-  in a repo the worker sees.
+- **The worker is isolated from your personal setup.** It runs with its own config dir
+  (`~/.claude-worker`: generic CLAUDE.md, no user-level hooks or memory, Bash sandbox on, a narrow
+  allow-list, secrets unreadable), so your own CLAUDE.md, memory and hooks are not sent to the provider
+  (`EXEC_SHARE_CONFIG=1` opts out). A coding agent still runs arbitrary code and the provider receives the
+  repo, the plan and every tool result: never put PII, `.env`, secrets or production data there. Limits and
+  consequences (sandbox required, no `npm install` during verify, `--allow`) are in
+  [`4tier-workflow.md`](claude/docs/4tier-workflow.md).
 - **One worker per repo**, so the review never reads a moving tree.
 - **No automatic failover** on 429 or an empty balance. The worker writes `status: BLOCKER` and
   stops; you switch lane by hand. Automatic switching would also destroy the comparison the
@@ -146,6 +155,8 @@ an independent review from a different vendor (Codex) through `codex exec review
   into the worker. The launcher sets env per process, and strips inherited Anthropic credentials
   (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) before launching, so they
   are never sent to a third-party host.
+- **Transcripts of the worker live in `~/.claude-worker/projects`**; `exec-scorecard` and `session-usage` scan both dirs
+  (`EXEC_SKIP_DIR` or the file `~/.claude/exec-skip-dir` excludes transcript paths containing a substring).
 - **`--strict-mcp-config` on the worker.** With many MCP servers, tool schemas can overflow a
   smaller context window on startup. The worker doesn't need MCP, so it is disabled.
 - **`CLAUDE_CODE_SUBAGENT_MODEL` and `ANTHROPIC_DEFAULT_FABLE_MODEL` are set on every lane**; without

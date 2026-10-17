@@ -3,6 +3,7 @@
 
 usage:
   session-usage [transcript.jsonl]          one transcript (default: newest), priced as MiMo-V2.6-Pro
+  session-usage --log [--budget USD]        exact numbers from headless runs (worker-run's ~/.claude/exec-usage.jsonl)
   session-usage --mimo [--days N] [--budget USD]
                                             every transcript, only turns whose model is mimo-*,
                                             priced per model, total vs. budget (default $10)
@@ -19,8 +20,25 @@ import json
 import os
 import time
 
-PROJECTS = os.path.expanduser("~/.claude/projects")
-SKIP_DIR = os.environ.get("EXEC_SKIP_DIR", "")  # substring of transcript paths to ignore (optional)
+# Transcript roots: your main config dir plus the isolated worker dir (claude-mimo/-glm/-kimi write there).
+ROOTS = list(dict.fromkeys(os.path.realpath(p) for p in (
+    os.path.expanduser("~/.claude/projects"),
+    os.path.join(os.path.expanduser(os.environ.get("EXEC_CONFIG_DIR", "~/.claude-worker")), "projects"))))
+
+
+def _skip_dir():
+    """Substring of transcript paths to ignore (e.g. a summarizer whose transcripts echo others').
+    Set EXEC_SKIP_DIR, or put the substring in ~/.claude/exec-skip-dir. Default: ignore nothing."""
+    v = os.environ.get("EXEC_SKIP_DIR")
+    if v is not None:
+        return v
+    try:
+        return open(os.path.expanduser("~/.claude/exec-skip-dir"), encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+
+
+SKIP_DIR = _skip_dir()
 # USD per 1M tokens: (cache-miss input, cache-hit input, output).
 # Source: mimo.mi.com/docs/en-US/price/pay-as-you-go, overseas table, read 2026-10-17.
 PRICES = {"pro": (0.435, 0.0036, 0.87), "flash": (0.14, 0.0028, 0.28)}
@@ -76,16 +94,46 @@ def show(t):
 
 
 def transcripts():
-    return [f for f in glob.glob(os.path.join(PROJECTS, "**", "*.jsonl"), recursive=True) if not (SKIP_DIR and SKIP_DIR in f)]
+    files = [f for root in ROOTS for f in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)]
+    return [f for f in files if not (SKIP_DIR and SKIP_DIR in f)]
+
+
+def show_log(budget):
+    path = os.path.expanduser("~/.claude/exec-usage.jsonl")
+    rows = []
+    try:
+        for line in open(path, encoding="utf-8"):
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+    except OSError:
+        pass
+    if not rows:
+        print("No headless runs logged yet (worker-run writes ~/.claude/exec-usage.jsonl).")
+        return
+    for r in rows[-8:]:
+        c = (f"${r['cost_usd']:.4f}" if r.get("cost_usd") is not None
+             else "timed out / unparsed" if (r.get("timeout") or r.get("unparsed")) else "flat-fee")
+        print(f"{r.get('ts', '?')}  {str(r.get('lane', '?')):5} {str(r.get('repo', '?'))[:22]:22} "
+              f"{r.get('turns')} turns {r.get('seconds')}s  {c}")
+    mimo = sum(r.get("cost_usd") or 0 for r in rows if r.get("lane") == "mimo")
+    print(f"runs: {len(rows)} | mimo exact spend in headless runs: ${mimo:.4f} | of ${budget:.2f} budget: ${budget - mimo:.2f} left")
+    print("(interactive sessions are not in this log: use --mimo for an estimate, and the Balance page for the truth)")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path", nargs="?")
     ap.add_argument("--mimo", action="store_true")
+    ap.add_argument("--log", action="store_true")
     ap.add_argument("--days", type=float, default=0)
     ap.add_argument("--budget", type=float, default=10.0)
     a = ap.parse_args()
+
+    if a.log:
+        show_log(a.budget)
+        return
 
     if not a.mimo:
         path = a.path or max((f for f in transcripts() if "/subagents/" not in f), key=os.path.getmtime)

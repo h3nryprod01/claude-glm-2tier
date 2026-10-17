@@ -16,10 +16,27 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 CARD = os.path.expanduser("~/.claude/exec-scorecard.jsonl")
-PROJECTS = os.path.expanduser("~/.claude/projects")
 # The summarizer pastes other sessions' transcripts into its own prompts, so anything
 # counted there is an echo, not a real event. Same trap that inflated the 2026-08-01 audit.
-SKIP_DIR = os.environ.get("EXEC_SKIP_DIR", "")  # substring of transcript paths to ignore (optional)
+# Transcript roots: your main config dir plus the isolated worker dir (claude-mimo/-glm/-kimi write there).
+ROOTS = list(dict.fromkeys(os.path.realpath(p) for p in (
+    os.path.expanduser("~/.claude/projects"),
+    os.path.join(os.path.expanduser(os.environ.get("EXEC_CONFIG_DIR", "~/.claude-worker")), "projects"))))
+
+
+def _skip_dir():
+    """Substring of transcript paths to ignore (e.g. a summarizer whose transcripts echo others').
+    Set EXEC_SKIP_DIR, or put the substring in ~/.claude/exec-skip-dir. Default: ignore nothing."""
+    v = os.environ.get("EXEC_SKIP_DIR")
+    if v is not None:
+        return v
+    try:
+        return open(os.path.expanduser("~/.claude/exec-skip-dir"), encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+
+
+SKIP_DIR = _skip_dir()
 
 FAMILIES = ("glm", "kimi", "mimo")
 
@@ -65,7 +82,8 @@ def scan_transcripts(cutoff_ts):
     turns = collections.Counter()
     tokens = collections.Counter()
     blocked = collections.Counter()
-    for f in glob.glob(os.path.join(PROJECTS, "**", "*.jsonl"), recursive=True):
+    files = [f for root in ROOTS for f in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)]
+    for f in files:
         if SKIP_DIR and SKIP_DIR in f:
             continue
         try:

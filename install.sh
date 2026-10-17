@@ -11,6 +11,7 @@ echo "Installing into $CLAUDE ..."
 mkdir -p "$CLAUDE/scripts" "$CLAUDE/commands" "$CLAUDE/docs" "$HOME/.local/bin"
 
 for f in "$HERE"/claude/scripts/*; do
+  [ -f "$f" ] || continue
   install -m 0755 "$f" "$CLAUDE/scripts/$(basename "$f")"
 done
 cp "$HERE/claude/executor-role.md" "$CLAUDE/executor-role.md"
@@ -25,7 +26,23 @@ for lane in glm kimi mimo; do
   ln -sf claude-exec "$CLAUDE/scripts/claude-$lane"
   ln -sf "$CLAUDE/scripts/claude-$lane" "$HOME/.local/bin/claude-$lane"
 done
-for tool in glm-job exec-scorecard session-usage; do
+# Isolated config dir for the worker lanes: they talk to a third-party provider, so they must not load
+# your personal ~/.claude (CLAUDE.md, memory, hooks, rules). Existing files are never overwritten.
+WORKER="${EXEC_CONFIG_DIR:-$HOME/.claude-worker}"
+mkdir -p "$WORKER/commands"
+for f in CLAUDE.md .claude.json; do
+  [ -f "$WORKER/$f" ] || cp "$HERE/claude/worker-config/$f" "$WORKER/$f"
+done
+# settings.json is the worker's security policy, so a newer template must reach existing installs.
+# The previous copy is kept as settings.json.bak (re-apply your own tweaks from it).
+if [ -f "$WORKER/settings.json" ] && ! cmp -s "$HERE/claude/worker-config/settings.json" "$WORKER/settings.json"; then
+  cp "$WORKER/settings.json" "$WORKER/settings.json.bak"
+  echo "Updated $WORKER/settings.json (previous copy saved as settings.json.bak)"
+fi
+cp "$HERE/claude/worker-config/settings.json" "$WORKER/settings.json"
+ln -sf "$CLAUDE/commands/glm-go.md" "$WORKER/commands/glm-go.md"
+
+for tool in glm-job exec-scorecard session-usage worker-run; do
   ln -sf "$CLAUDE/scripts/$tool" "$HOME/.local/bin/$tool"
 done
 
@@ -40,7 +57,8 @@ echo "Next steps (pick at least one worker lane; MiMo shown, see the docs for gl
 echo "  1) Sign up at https://platform.xiaomimimo.com, top up a small balance (no auto-recharge),"
 echo "     create an sk-... key under Console > API Keys (NOT a tp-... Token Plan key)."
 echo "  2) Store it without echoing it:"
-echo "       printf 'Paste MiMo key, then Enter: '; IFS= read -rs k; echo; printf '%s' \"\$k\" | tr -d '[:space:]' > $CLAUDE/.mimo-key && chmod 600 $CLAUDE/.mimo-key; unset k"
+echo "       printf 'Paste MiMo key, then Enter: '; IFS= read -rs k; echo; printf '%s' \"\$k\" | tr -d '[:space:]' > \"$CLAUDE/.mimo-key\" && chmod 600 \"$CLAUDE/.mimo-key\"; unset k"
 echo "  3) Open a new terminal, then:  EXEC_DRYRUN=1 claude-mimo"
 echo
+echo "Worker config (isolated, no personal data): $WORKER   (EXEC_SHARE_CONFIG=1 opts out)"
 echo "Docs: $CLAUDE/docs/4tier-workflow.md"

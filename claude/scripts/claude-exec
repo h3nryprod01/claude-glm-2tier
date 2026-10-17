@@ -65,7 +65,7 @@ case "$provider" in
     KEY_HELP="1) Sign up + top up a small balance: https://platform.xiaomimimo.com (Balance page)
    2) Create the key at Console > API Keys (format sk-...). NOT the Token Plan key (tp-...).
    3) Store it without echoing it (the prompt hides what you paste):
-      printf 'Paste MiMo key, then Enter: '; IFS= read -rs k; echo; printf '%s' \"\$k\" | tr -d '[:space:]' > $KEY_FILE && chmod 600 $KEY_FILE; unset k"
+      printf 'Paste MiMo key, then Enter: '; IFS= read -rs k; echo; printf '%s' \"\$k\" | tr -d '[:space:]' > \"$KEY_FILE\" && chmod 600 \"$KEY_FILE\"; unset k"
     ;;
   *)
     echo "❌ Unknown provider: '$provider'" >&2
@@ -103,8 +103,22 @@ env_vars=(
   "CLAUDE_CODE_SUBAGENT_MODEL=$BIG_MODEL"
   "ANTHROPIC_DEFAULT_HAIKU_MODEL=$SMALL_MODEL"
   "CLAUDE_CODE_AUTO_COMPACT_WINDOW=${COMPACT_WINDOW:-1000000}"
+  # Sandboxed Bash children would otherwise inherit the provider key from this process env.
+  "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"
 )
 env_vars+=(${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"})
+
+# The worker talks to a THIRD-PARTY provider, so it must not load your personal ~/.claude (CLAUDE.md,
+# memory, hooks, rules, settings). It gets its own config dir instead; install.sh provisions it from
+# claude/worker-config. EXEC_SHARE_CONFIG=1 opts out; EXEC_CONFIG_DIR overrides the location.
+if [[ "${EXEC_SHARE_CONFIG:-}" != "1" ]]; then
+  CFG_DIR="${EXEC_CONFIG_DIR:-$HOME/.claude-worker}"
+  if [[ ! -f "$CFG_DIR/settings.json" ]]; then
+    echo "❌ Worker config dir $CFG_DIR is not provisioned (run install.sh, or set EXEC_SHARE_CONFIG=1 to use ~/.claude)." >&2
+    exit 1
+  fi
+  env_vars+=("CLAUDE_CONFIG_DIR=$CFG_DIR")
+fi
 
 if [[ -n "${EXEC_DRYRUN:-}" ]]; then
   echo "provider=$provider"
